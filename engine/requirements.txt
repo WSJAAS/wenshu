@@ -1,0 +1,4 @@
+# engine/ 的第三方依赖
+# 本地规则改写与文本体检只用标准库，无需额外安装；
+# 仅模型调用（llm_client.py）需要 litellm。
+litellm>=1.50.0

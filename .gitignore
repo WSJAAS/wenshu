@@ -1,0 +1,24 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ---- Node ----
+node_modules/
+dist/
+.vite/
+
+# ---- 运行时数据（不入库）----
+runtime/
+backend/static/
+backend/embedding/
+backend/.env
+backend/.instance_id
+engine/finish/
+
+# ---- 其他 ----
+.DS_Store
+Thumbs.db
+.pytest_cache/

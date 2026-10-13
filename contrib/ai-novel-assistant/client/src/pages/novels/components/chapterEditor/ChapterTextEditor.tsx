@@ -1,0 +1,456 @@
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { Value } from "platejs";
+import { ParagraphPlugin, Plate, PlateContent, usePlateEditor } from "platejs/react";
+import type { ChapterEditorDiffChunk } from "@ai-novel/shared/types/novel";
+import { applySelectedChapterEditorDiff, groupChapterEditorDiffChanges } from "@ai-novel/shared/types/chapterEditor/document";
+import type { ChapterEditorDiffChange } from "@ai-novel/shared/types/chapterEditor/document";
+import type { ChapterEditorSelectionRange, SelectionToolbarPosition } from "./chapterEditorTypes";
+import {
+  buildSelectionRangeFromValue,
+  buildToolbarPosition,
+  getCursorOffsetFromValue,
+  getParagraphIndicesForRange,
+  normalizeChapterContent,
+  normalizeEditorText,
+  normalizeValuePayload,
+  toPlainText,
+  toPlateValue,
+} from "./document";
+
+type ChapterEditorPreview =
+  | {
+    mode: "loading";
+    from: number;
+    to: number;
+    originalText: string;
+  }
+  | {
+    mode: "inline";
+    from: number;
+    to: number;
+    diffChunks: ChapterEditorDiffChunk[];
+    selectedChangeIds: ReadonlySet<string>;
+    originalText: string;
+    candidateText: string;
+  }
+  | {
+    mode: "block";
+    from: number;
+    to: number;
+    diffChunks: ChapterEditorDiffChunk[];
+    selectedChangeIds: ReadonlySet<string>;
+    originalText: string;
+    candidateText: string;
+  };
+
+interface ChapterTextEditorProps {
+  value: string;
+  readOnly?: boolean;
+  onChange: (next: string) => void;
+  onSelectionChange: (selection: ChapterEditorSelectionRange | null, position: SelectionToolbarPosition | null) => void;
+  onCursorChange: (offset: number | null, position: SelectionToolbarPosition | null) => void;
+  preview?: ChapterEditorPreview | null;
+  focusRange?: Pick<ChapterEditorSelectionRange, "from" | "to"> | null;
+}
+
+const EDITOR_BODY_CLASS_NAME = "prose prose-sm max-w-none min-w-0 overflow-hidden break-words text-[15px] leading-8 dark:prose-invert [&_code]:break-all [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:whitespace-pre-wrap [&_pre]:break-words";
+const INLINE_PREVIEW_BODY_CLASS_NAME = `${EDITOR_BODY_CLASS_NAME} whitespace-pre-wrap`;
+const READONLY_BODY_CLASS_NAME = "min-w-0 break-words text-[15px] leading-8";
+const SURFACE_INNER_PADDING_CLASS_NAME = "pl-14";
+
+function splitDisplayParagraphs(text: string): string[] {
+  const normalized = normalizeChapterContent(text);
+  if (!normalized) {
+    return [];
+  }
+  return normalized.split(/\n{2,}/).map((paragraph) => paragraph.trim()).filter(Boolean);
+}
+
+function TextBlock(props: { text: string; className?: string }) {
+  const { text, className } = props;
+  const paragraphs = splitDisplayParagraphs(text);
+  if (paragraphs.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className={`${READONLY_BODY_CLASS_NAME} ${className ?? ""}`.trim()}>
+      {paragraphs.map((paragraph, index) => (
+        <p key={`${index}:${paragraph.slice(0, 16)}`} className="mb-6 last:mb-0">
+          {paragraph}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function getParagraphElements(surface: HTMLDivElement): HTMLElement[] {
+  const richTextRoot = surface.querySelector('[contenteditable="true"]') as HTMLDivElement | null;
+  const searchRoot = richTextRoot ?? surface;
+  const candidates = Array.from(
+    searchRoot.querySelectorAll<HTMLElement>('[data-slate-node="element"], p'),
+  );
+
+  return candidates.filter((node) => node.textContent?.trim());
+}
+
+function renderDiffChunk(chunk: ChapterEditorDiffChunk, change: ChapterEditorDiffChange | undefined, selected: boolean) {
+  if (chunk.type === "equal") {
+    return <span key={chunk.id}>{chunk.text}</span>;
+  }
+  if (chunk.type === "insert") {
+    return (
+      <span key={chunk.id} className={`rounded px-0.5 ${selected ? "bg-emerald-100/90 text-emerald-950" : "bg-muted/40 text-muted-foreground"}`} data-diff-change-id={change?.id}>
+        {chunk.text}
+      </span>
+    );
+  }
+  return (
+    <span key={chunk.id} className={`rounded px-0.5 line-through ${selected ? "bg-rose-100/80 text-rose-900" : "bg-muted/40 text-muted-foreground"}`} data-diff-change-id={change?.id}>
+      {chunk.text}
+    </span>
+  );
+}
+
+function renderLoadingPreview(
+  preview: Extract<ChapterEditorPreview, { mode: "loading" }>,
+  previewContent: { before: string; after: string },
+  surfaceRef: React.RefObject<HTMLDivElement | null>,
+) {
+  const isInsertion = preview.from === preview.to && preview.originalText.length === 0;
+  return (
+    <div ref={surfaceRef} className={`space-y-4 rounded-2xl bg-muted/10 p-4 ${SURFACE_INNER_PADDING_CLASS_NAME}`}>
+      <TextBlock text={previewContent.before} className="text-foreground" />
+
+      <div className="space-y-3">
+        <div className="rounded-2xl border border-amber-200/80 bg-amber-50/80 p-4">
+          <div className="mb-2 text-xs font-medium text-amber-700">{isInsertion ? "待插入位置" : "待改写原文"}</div>
+          {isInsertion ? <div className="text-sm text-amber-950">光标所在位置将插入 AI 候选正文。</div> : <TextBlock text={preview.originalText} className="text-amber-950" />}
+        </div>
+        <div className="rounded-2xl border border-dashed border-border/70 bg-background/80 p-4">
+          <div className="mb-2 text-xs font-medium text-muted-foreground">AI 正在生成候选版本</div>
+          <div className="space-y-2">
+            <div className="h-4 w-11/12 rounded-full bg-muted/70" />
+            <div className="h-4 w-full rounded-full bg-muted/60" />
+            <div className="h-4 w-4/5 rounded-full bg-muted/50" />
+          </div>
+        </div>
+      </div>
+
+      <TextBlock text={previewContent.after} className="text-foreground" />
+    </div>
+  );
+}
+
+function renderBlockPreview(
+  preview: Extract<ChapterEditorPreview, { mode: "block" }>,
+  previewContent: { before: string; after: string },
+  surfaceRef: React.RefObject<HTMLDivElement | null>,
+) {
+  const isInsertion = preview.from === preview.to && preview.originalText.length === 0;
+  let selectedText = preview.candidateText;
+  try {
+    selectedText = applySelectedChapterEditorDiff(preview.originalText, preview.candidateText, preview.diffChunks, preview.selectedChangeIds);
+  } catch {
+    // The review panel surfaces the validation error; keep the full candidate visible as context.
+  }
+  return (
+    <div ref={surfaceRef} className={`space-y-4 rounded-2xl bg-muted/10 p-4 ${SURFACE_INNER_PADDING_CLASS_NAME}`}>
+      <TextBlock text={previewContent.before} className="text-foreground" />
+
+      <div className="space-y-3">
+        <div className="rounded-2xl border border-rose-200/80 bg-rose-50/80 p-4">
+          <div className="mb-2 text-xs font-medium text-rose-700">{isInsertion ? "插入位置" : "原文"}</div>
+          {isInsertion ? <div className="text-sm text-rose-950">这里没有需要删除的原文，候选会作为新内容插入。</div> : <TextBlock text={preview.originalText} className="text-rose-950" />}
+        </div>
+        <div className="rounded-2xl border border-emerald-200/80 bg-emerald-50/90 p-4">
+          <div className="mb-2 text-xs font-medium text-emerald-700">本次将写回</div>
+          {selectedText === preview.originalText || !selectedText.trim() ? (
+            <div className="text-sm text-emerald-950/70">当前没有选择要写回的改动。</div>
+          ) : (
+            <TextBlock text={selectedText} className="text-emerald-950" />
+          )}
+        </div>
+      </div>
+
+      <TextBlock text={previewContent.after} className="text-foreground" />
+    </div>
+  );
+}
+
+export default function ChapterTextEditor(props: ChapterTextEditorProps) {
+  const { value, readOnly = false, onChange, onSelectionChange, onCursorChange, preview, focusRange = null } = props;
+  const [editorSeed, setEditorSeed] = useState(0);
+  const [internalText, setInternalText] = useState(() => normalizeChapterContent(value));
+  const [paragraphMarkerOffsets, setParagraphMarkerOffsets] = useState<Array<{ index: number; top: number }>>([]);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const isUserEditingRef = useRef(false);
+
+  const editor = usePlateEditor(
+    {
+      plugins: [ParagraphPlugin],
+      value: toPlateValue(internalText),
+    },
+    [editorSeed],
+  );
+
+  useEffect(() => {
+    const nextValue = normalizeChapterContent(value);
+    if (nextValue === internalText) {
+      return;
+    }
+    setInternalText(nextValue);
+    setEditorSeed((current) => current + 1);
+  }, [internalText, value]);
+
+  useEffect(() => {
+    if (preview || readOnly) {
+      onSelectionChange(null, null);
+      onCursorChange(null, null);
+    }
+  }, [onCursorChange, onSelectionChange, preview, readOnly]);
+
+  const updateSelection = useCallback(() => {
+    if (!editor || preview || readOnly) {
+      onSelectionChange(null, null);
+      onCursorChange(null, null);
+      return;
+    }
+
+    const selectionObject = globalThis.window?.getSelection?.();
+    const surface = surfaceRef.current;
+    if (!selectionObject || !surface || selectionObject.rangeCount === 0 || selectionObject.isCollapsed) {
+      if (selectionObject?.isCollapsed && surface && selectionObject.rangeCount > 0 && surface.contains(selectionObject.anchorNode)) {
+        const range = selectionObject.getRangeAt(0);
+        const point = editor.selection?.anchor as { path: number[]; offset: number } | undefined;
+        const offset = getCursorOffsetFromValue(editor.children as Value, point);
+        const container = containerRef.current;
+        const position = container ? buildToolbarPosition(container, range) : null;
+        onSelectionChange(null, null);
+        onCursorChange(offset, position);
+      } else {
+        onSelectionChange(null, null);
+        onCursorChange(null, null);
+      }
+      return;
+    }
+
+    const range = selectionObject.getRangeAt(0);
+    if (!surface.contains(range.commonAncestorContainer)) {
+      onSelectionChange(null, null);
+      onCursorChange(null, null);
+      return;
+    }
+
+    const selectionRange = buildSelectionRangeFromValue(editor.children as Value, editor.selection as {
+      anchor: { path: number[]; offset: number };
+      focus: { path: number[]; offset: number };
+    } | null);
+    if (!selectionRange) {
+      onSelectionChange(null, null);
+      onCursorChange(null, null);
+      return;
+    }
+
+    const container = containerRef.current;
+    const position = container ? buildToolbarPosition(container, range) : null;
+
+    onSelectionChange(selectionRange, position);
+    onCursorChange(null, null);
+  }, [editor, onCursorChange, onSelectionChange, preview, readOnly]);
+
+  const handleValueChange = useCallback((payload: unknown) => {
+    const nextText = normalizeEditorText(toPlainText(normalizeValuePayload(payload)));
+    if (!isUserEditingRef.current || nextText === internalText) {
+      return;
+    }
+    setInternalText(nextText);
+    onChange(nextText);
+  }, [internalText, onChange]);
+
+  const normalizedContent = useMemo(() => normalizeChapterContent(value), [value]);
+
+  const previewChangeByChunkId = useMemo(() => {
+    if (!preview || preview.mode === "loading") {
+      return new Map<string, ChapterEditorDiffChange>();
+    }
+    return new Map(
+      groupChapterEditorDiffChanges(preview.diffChunks)
+        .flatMap((change) => change.chunkIds.map((chunkId) => [chunkId, change] as const)),
+    );
+  }, [preview]);
+
+  const previewContent = useMemo(() => {
+    if (!preview) {
+      return null;
+    }
+    return {
+      before: normalizedContent.slice(0, preview.from),
+      after: normalizedContent.slice(preview.to),
+    };
+  }, [normalizedContent, preview]);
+
+  const highlightedParagraphRange = useMemo(
+    () => (focusRange ? getParagraphIndicesForRange(normalizedContent, focusRange) : null),
+    [focusRange, normalizedContent],
+  );
+
+  const helperText = preview?.mode === "inline"
+    ? "当前正在显示细节标记 diff，适合确认具体删改。"
+    : preview?.mode === "loading"
+      ? "AI 正在基于选中内容生成候选版本，原文位置会持续保留。"
+      : preview?.mode === "block"
+        ? "当前正在显示段落 patch 对比，原文和改写会在正文原位置并排落成红绿块。"
+        : readOnly
+          ? "当前有待确认候选，正文暂时锁定，可在右侧切换候选或接受、拒绝。"
+      : "点击正文放置光标，可选续写、过渡、对话或心理描写；选中片段可用 AI 改写。候选确认后写入正文。";
+
+  useEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface || preview) {
+      return;
+    }
+    const paragraphNodes = getParagraphElements(surface);
+    paragraphNodes.forEach((node) => {
+      node.classList.remove("bg-sky-100/90", "ring-1", "ring-sky-200", "rounded-xl");
+    });
+    if (!focusRange) {
+      return;
+    }
+    const paragraphIndices = getParagraphIndicesForRange(normalizedContent, focusRange);
+    if (!paragraphIndices) {
+      return;
+    }
+    for (let index = paragraphIndices.startIndex; index <= paragraphIndices.endIndex; index += 1) {
+      const node = paragraphNodes[index];
+      node?.classList.add("bg-sky-100/90", "ring-1", "ring-sky-200", "rounded-xl");
+    }
+    paragraphNodes[paragraphIndices.startIndex]?.scrollIntoView({
+      block: "center",
+      behavior: "smooth",
+    });
+  }, [highlightedParagraphRange, preview]);
+
+  const updateParagraphMarkers = useCallback(() => {
+    const surface = surfaceRef.current;
+    if (!surface) {
+      setParagraphMarkerOffsets([]);
+      return;
+    }
+
+    const surfaceRect = surface.getBoundingClientRect();
+    const paragraphNodes = getParagraphElements(surface);
+    const nextOffsets = paragraphNodes.map((node, index) => {
+      const rect = node.getBoundingClientRect();
+      return {
+        index,
+        top: rect.top - surfaceRect.top + rect.height / 2,
+      };
+    });
+
+    setParagraphMarkerOffsets((current) => {
+      if (
+        current.length === nextOffsets.length
+        && current.every((item, index) => item.index === nextOffsets[index]?.index && Math.abs(item.top - nextOffsets[index]!.top) < 1)
+      ) {
+        return current;
+      }
+      return nextOffsets;
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    updateParagraphMarkers();
+
+    const surface = surfaceRef.current;
+    if (!surface) {
+      return;
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      updateParagraphMarkers();
+    });
+
+    resizeObserver.observe(surface);
+    getParagraphElements(surface).forEach((node) => resizeObserver.observe(node));
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [editorSeed, normalizedContent, preview, readOnly, updateParagraphMarkers]);
+
+  const paragraphMarkers = paragraphMarkerOffsets.length > 0 ? (
+    <div className="pointer-events-none absolute inset-y-0 left-0 top-0 z-10 w-12">
+      {paragraphMarkerOffsets.map((marker) => {
+        const isHighlighted = highlightedParagraphRange
+          ? marker.index >= highlightedParagraphRange.startIndex && marker.index <= highlightedParagraphRange.endIndex
+          : false;
+        return (
+          <div
+            key={`marker:${marker.index}`}
+            className={`absolute left-0 flex w-12 justify-end pr-3 text-[11px] font-semibold ${
+              isHighlighted ? "text-sky-700" : "text-muted-foreground"
+            }`}
+            style={{ top: `${marker.top}px`, transform: "translateY(-50%)" }}
+          >
+            P{marker.index + 1}
+          </div>
+        );
+      })}
+    </div>
+  ) : null;
+
+  return (
+    <div ref={containerRef} className="relative flex h-full min-h-[540px] flex-col overflow-hidden rounded-3xl border border-border/70 bg-background shadow-sm xl:min-h-0">
+      <div className="shrink-0 flex items-center justify-between border-b border-border/70 px-4 py-3">
+        <div className="text-sm font-medium text-foreground">正文</div>
+        <div className="text-xs text-muted-foreground">{helperText}</div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        <div className="relative min-h-full">
+          {preview?.mode === "inline" && previewContent ? (
+            <div
+              ref={surfaceRef}
+              className={`${INLINE_PREVIEW_BODY_CLASS_NAME} ${SURFACE_INNER_PADDING_CLASS_NAME} min-h-full rounded-2xl bg-muted/15 p-4 text-foreground`}
+            >
+              {previewContent.before}
+              {preview.diffChunks.map((chunk) => renderDiffChunk(chunk, previewChangeByChunkId.get(chunk.id), preview.selectedChangeIds.has(previewChangeByChunkId.get(chunk.id)?.id ?? "")))}
+              {previewContent.after}
+            </div>
+          ) : preview?.mode === "loading" && previewContent ? (
+            renderLoadingPreview(preview, previewContent, surfaceRef)
+          ) : preview?.mode === "block" && previewContent ? (
+            renderBlockPreview(preview, previewContent, surfaceRef)
+          ) : readOnly ? (
+            <div
+              ref={surfaceRef}
+              className={`min-h-full rounded-2xl bg-muted/10 p-4 text-foreground ${SURFACE_INNER_PADDING_CLASS_NAME}`}
+            >
+              <TextBlock text={normalizedContent} />
+            </div>
+          ) : editor ? (
+            <Plate editor={editor} onSelectionChange={updateSelection} onValueChange={handleValueChange}>
+              <div ref={surfaceRef} className="min-h-full">
+                <PlateContent
+                  className={`${EDITOR_BODY_CLASS_NAME} ${SURFACE_INNER_PADDING_CLASS_NAME} min-h-full rounded-2xl bg-muted/10 p-4 outline-none [&_p]:text-foreground`}
+                  onFocus={() => {
+                    isUserEditingRef.current = true;
+                  }}
+                  onBlur={() => {
+                    isUserEditingRef.current = false;
+                  }}
+                  onMouseUp={updateSelection}
+                  onKeyUp={updateSelection}
+                />
+              </div>
+            </Plate>
+          ) : null}
+
+          {paragraphMarkers}
+        </div>
+      </div>
+    </div>
+  );
+}
