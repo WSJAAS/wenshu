@@ -1,1 +1,43 @@
-# LFS tracking removed - models downloaded from HuggingFace at runtime
+# 默认：自动处理换行（入库统一 LF，检出时按平台）
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.onnx binary
+*.db binary
+*.sqlite3 binary
+
+# Windows 脚本保留 CRLF，否则 cmd 解析会出错
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 文本文件明确声明
+*.py    text diff=python
+*.ts    text
+*.tsx   text
+*.js    text
+*.json  text
+*.md    text
+*.yml   text
+*.yaml  text
+*.toml  text
+*.ini   text
+*.env*  text
+*.sh    text eol=lf
+
+# 中文文件名 / 内容：不额外转换
+
+# 语言统计（GitHub 用）
+*.py    linguist-language=Python
+*.tsx   linguist-language=TypeScript
+*.ts    linguist-language=TypeScript
+
