@@ -1,2 +1,0 @@
-ALTER TABLE "APIKey"
-ADD COLUMN "availableModels" TEXT NOT NULL DEFAULT '[]';

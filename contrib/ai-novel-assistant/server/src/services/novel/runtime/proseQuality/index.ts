@@ -1,1 +1,0 @@
-export { detectNewSevereProseFindings } from "./ProseQualityDetector";

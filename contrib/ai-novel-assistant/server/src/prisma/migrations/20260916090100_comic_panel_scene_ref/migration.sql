@@ -1,1 +1,0 @@
-ALTER TABLE "ComicPanel" ADD COLUMN IF NOT EXISTS "sceneRef" TEXT;

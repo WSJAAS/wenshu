@@ -1,1 +1,0 @@
-ALTER TABLE "APIKey" ADD COLUMN "authMode" TEXT NOT NULL DEFAULT 'bearer';

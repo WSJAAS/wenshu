@@ -22,3 +22,7 @@ engine/finish/
 .DS_Store
 Thumbs.db
 .pytest_cache/
+
+# contrib：第三方参考代码，含商业许可条款，不推送
+contrib/
+

@@ -1,76 +1,61 @@
 # 文枢 Wenshu
 
-本地 AI 长篇小说创作工作台。集创作底座与文本重塑引擎于一体，单机可跑，无需登录。
+本地跑的长篇小说创作工具。写设定、捋大纲、生成章节、改文风，都在一个页面里。
 
-> **文枢**（wén shū）：文章的枢纽。取"枢"字意在它是创作流程的转轴——
-> 设定、大纲、章节、润色、采纳、导出，都在同一处收束。
-
----
-
-## 这是什么
-
-一套**本地优先**的小说创作工具。把原先分散在两处的能力合并进同一个工程：
-
-| 能力 | 来源 | 说明 |
-| :--- | :--- | :--- |
-| 创作底座 | MuMuAINovel（GPL-3.0） | 项目／人物／大纲／章节／伏笔／关系图 |
-| 文本重塑引擎 | baibaiAIGC（AGPL-3.0） | 去 AI 痕迹、规则改写、文本体检、任务隔离 |
-| 参考实现 | AI-Novel-Assistant（AGPL-3.0 + 商业双许可） | **仅本地研读，见 `contrib/` 说明** |
-
-合并后整体以 **AGPL-3.0** 分发，见 [许可证](#许可证)。
+不用登录，不用 Docker，数据全在你自己电脑上。
 
 ---
 
-## 特性
+## 它能干什么
 
-### 创作链路
+**写**
+- 作品、人物、大纲、章节、伏笔、关系图，一套齐
+- 设定一次写好，后面生成章节时自动带上
 
-建立项目 → 整理人物与设定 → 大纲 → 生成章节 → 对照润色 → 人工采纳 → 保存版本 → 导出
+**改**
+- 去 AI 味：把「他感到十分疲惫」改成「他眼皮沉得像灌了铅」
+- 体检：给文本打分，指出哪句是套话、哪里缺感官描写
+- 改完给你候选稿，**原稿不动**，你看过觉得行才采纳
 
-### 文本重塑引擎（`engine/`）
-
-三个能力可独立调用，也可经界面使用：
-
-- **去 AI 痕迹**（`local_rewriter.py`）：逐条规则表改写，输出完全由输入决定，不调用模型也能用。
-- **文本体检**（`text_diagnostics.py`）：阅读体验评分、Show/Tell 比、感官词密度、套话检出。
-- **任务隔离**（`aigc_round_service.py`）：按输入内容指纹区分任务，避免不同稿件互相复用结果。
-
-### 无登录
-
-本地单人使用，默认以本地管理员身份直接进入，无登录页、无 Cookie 校验。
-如需恢复鉴权，见 [docs/无登录改造.md](docs/无登录改造.md)。
+**查**
+- 让助手并发检查好几章的一致性，查出人物年龄对不对、时间线顺不顺
+- 每条问题都标出处，说清是哪一章哪句话
 
 ---
 
-## 快速开始
+## 为什么做这个
 
-### 环境
+市面上的 AI 写作工具要么强制登录、要么数据在别人服务器、要么得开好几个软件来回倒文本。
 
-| 项 | 版本 |
-| :--- | :--- |
-| Python | 3.12+ |
-| Node.js | 20+ |
-| 数据库 | SQLite（内置，无需额外安装） |
+这个工具的想法很简单：**一个本地页面，写完直接导出，中间不用倒腾。**
 
-### 一、装依赖
+具体做法：
+
+- **原稿永远安全。** 改写只产出候选稿，采纳才落盘，随时能退回上一版。
+- **任务各算各的。** 同时处理两篇稿子不会串——每篇有自己的任务号，还按内容指纹校验。
+- **改到一半能看。** 并发检查多章时进度实时往外出，不用干等。
+- **失败不拖累别人。** 三个任务里挂一个，另外两个照常出结果。
+
+---
+
+## 装
+
+需要 Python 3.12+ 和 Node.js 20+。数据库用 SQLite，不用另装。
+
+### 1. 后端
 
 ```powershell
-# 后端
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
-
-# 前端
-cd frontend
-npm install
 ```
 
-### 二、配置
+### 2. 配置
 
 ```powershell
 copy backend\.env.example backend\.env
 ```
 
-编辑 `backend\.env`，至少填写一组模型凭证：
+打开 `backend\.env`，填上模型信息：
 
 ```ini
 OPENAI_API_KEY=你的密钥
@@ -78,25 +63,26 @@ OPENAI_BASE_URL=https://你的端点/v1
 DEFAULT_MODEL=你的模型名
 ```
 
-> 不填也能启动：改造页与文本体检走本地规则，不依赖模型。
+**不填也能跑。** 改文风和体检走本地规则，不需要模型。只有生成章节和让助手干活才要。
 
-### 三、建库
+### 3. 建库
 
 ```powershell
 cd backend
 ..\.venv\Scripts\python.exe -m alembic -c alembic-sqlite.ini upgrade head
 ```
 
-### 四、构建前端
+### 4. 前端
 
 ```powershell
 cd frontend
+npm install
 npm run build
 ```
 
-产物直接落在 `backend/static`，由后端一并服务。
+打包结果直接丢进 `backend/static`，后端一起伺服。
 
-### 五、启动
+### 5. 启动
 
 ```powershell
 cd backend
@@ -105,78 +91,75 @@ cd backend
 
 打开 http://127.0.0.1:8000
 
-> **注意**：工作目录必须是 `backend/`。配置以相对路径读取 `.env`，
-> 从别处启动会读不到配置。
+> **注意工作目录必须是 `backend/`。** 配置是按相对路径读的，从别处启动读不到。
+
+或者直接用 `tools\start.bat`。
 
 ---
 
-## 命令行入口
+## 命令行
 
-`tools/novelctl.py` 把创作、润色、记忆收敛到一条命令，支持 `--json` 供脚本调用。
+不想开浏览器就用这个：
 
 ```powershell
-novelctl status                    # 平台状态
-novelctl projects                  # 列出作品
-novelctl new "作品名" --genre 悬疑  # 建立作品
-novelctl chapters <项目ID>          # 列出章节
-novelctl export <项目ID> -o 稿件.txt # 导出
+novelctl status                    # 看看跑没跑起来
+novelctl projects                  # 有哪些作品
+novelctl new "书名" --genre 悬疑    # 建一个
+novelctl chapters <项目ID>          # 看章节
+novelctl export <项目ID> -o 稿.txt  # 导出
 
-novelctl polish -f 稿件.txt -o 候选.txt  # 润色，产出候选稿不改原稿
-novelctl accept -f 候选.txt              # 人工采纳
-novelctl rollback                        # 版本回退
+novelctl polish -f 稿.txt -o 改后.txt   # 改文风，原稿不动
+novelctl accept -f 改后.txt              # 采纳
+novelctl rollback                        # 退回上一版
+
+novelctl diagnose -f 稿.txt              # 体检
 ```
+
+加 `--json` 出结构化结果，方便脚本调。
 
 ---
 
-## 目录结构
+## 目录
 
 ```
 wenshu/
-├── backend/                 创作底座后端（FastAPI）
-│   ├── app/api/             接口层（含 polish.py 去 AI 味）
-│   ├── app/services/        业务服务
-│   ├── app/models/          数据模型
-│   └── alembic/sqlite/      SQLite 迁移
-├── frontend/                前端（React + Vite + antd）
-│   └── src/pages/           页面（含 Polish.tsx 润色工作台）
-├── engine/                  文本重塑引擎（可独立调用）
-│   ├── local_rewriter.py    去 AI 痕迹规则表
-│   ├── text_diagnostics.py  文本体检与评分
-│   ├── aigc_round_service.py 任务隔离与分块改写
-│   └── prompts/             改写提示词
-├── tools/                   启动脚本与 CLI
-├── contrib/                 第三方参考件（仅本地研读）
-├── docs/                    说明文档
-└── licenses/                许可证全文
+├── backend/     后端（FastAPI + SQLite）
+├── frontend/    界面（React + Vite + Ant Design）
+├── engine/      改文风和体检的引擎，可以单独用
+├── tools/       启动脚本、命令行、测试
+├── docs/        说明文档
+└── contrib/     第三方参考代码（只读，不参与运行）
+```
+
+---
+
+## 怎么跑测试
+
+```powershell
+# 子代理模块
+.\.venv\Scripts\python.exe tools\test_subagent.py
+.\.venv\Scripts\python.exe tools\test_subagent_stream.py
+.\.venv\Scripts\python.exe tools\test_subagent_stage3.py
+
+# 端到端（需要服务先跑起来）
+.\.venv\Scripts\python.exe tools\accept_e2e.py
 ```
 
 ---
 
 ## 许可证
 
-本项目合并了两个 GPL 系作品，依据 **GPLv3 §13**（与 AGPLv3 的兼容条款）
-作为一个整体，以 **AGPL-3.0-only** 发布。
+**AGPL-3.0**
 
-| 部分 | 来源 | 原许可证 |
-| :--- | :--- | :--- |
-| `backend/` `frontend/` | MuMuAINovel | GPL-3.0 |
-| `engine/` | baibaiAIGC | AGPL-3.0 |
-| `contrib/ai-novel-assistant/` | AI-Novel-Assistant | AGPL-3.0-only + 商业双许可 |
+这个项目是把两个开源作品合起来的：
 
-**这意味着**：
+- [MuMuAINovel](https://github.com/xiamuceer-j/MuMuAINovel)（GPL-3.0）→ `backend/` `frontend/`
+- baibaiAIGC（AGPL-3.0）→ `engine/`
 
-- 你可以自由使用、修改、分发；
-- 若通过网络向他人提供服务，必须向其提供完整源码（AGPL §13）；
-- 保留原作者版权声明，标明修改。
+按 GPLv3 第 13 条，GPL 作品可以和 AGPL 作品合并，合并后整体算 AGPL。所以这个项目整体是 AGPL-3.0。
 
-`contrib/ai-novel-assistant/` 仅作**本地研读参考**，其商业授权条款依然有效——
-如需商用分发，须另行取得原作者授权。详见 [contrib/README.md](contrib/README.md)。
+**这意味着**：你可以随便用、随便改。但如果你拿它开网站给别人用，得把源码给用户。
 
-第三方组件清单见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+`contrib/` 里那份 AI-Novel-Assistant 有商业授权条款，只放在那儿当资料看，不参与运行。别拿它商用。
 
----
-
-## 改动说明
-
-本项目相对上游的修改见 [CHANGES.md](CHANGES.md)，
-按 AGPL §5 要求逐项标注了修改内容与日期。
+第三方依赖清单见 [THIRD_PARTY.md](THIRD_PARTY.md)，改了什么见 [CHANGES.md](CHANGES.md)。
