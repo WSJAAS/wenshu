@@ -68,6 +68,41 @@
 **依据**：AGPL-3.0 §5 允许修改，§7(e) 允许附加条款但不得误标来源。
 本次更名已保留原版权声明与许可证全文，不暗示原作者认可。
 
+### 1.9 子代理调度
+
+**改动文件**：
+
+- `backend/app/services/subagent_contract.py`（新增）
+- `backend/app/services/subagent_executor.py`（新增）
+- `backend/app/services/project_agent_tools.py`（注册 `dispatch_subagents`）
+- `backend/app/services/project_agent_service.py`（新增流式分支与快照构建器）
+- `frontend/src/components/project-agent/ProjectAgentPanel.tsx`（见下）
+
+**原因**：上游的 Agent 是单 agent + 工具循环（`MAX_TOOL_ROUNDS = 4`），
+每次工具执行都是 `await registry.execute()` 完成后才发一次更新，
+执行期间时间线静止。批量检查跨章一致性时既慢又看不到进度。
+
+**改动内容**：
+
+1. 新增只读子任务执行模块：有界并发、可取消、受整轮预算约束。
+2. 子任务不持有数据库会话、写工具与 MCP 工具，
+   只接收主流程固化的文本快照。
+3. 新增 `_dispatch_subagents_stream` 流式分支，
+   在执行期间逐个子任务转发 `step_start` / `step_update`。
+4. 预算从第一版生效，重复派发与重试共享同一份整轮额度。
+
+**前端改动（`ProjectAgentPanel.tsx`）**：
+
+- `onStepUpdate` 由上游的 `map` 改为真正的 upsert 并按 `sequence` 排序。
+  上游实现对**不存在**的 `step.id` 不做任何处理，
+  因此缺少 `step_start` 的步骤会被静默忽略，进度永远不显示。
+- 新增 `subagent` 步骤的图标与分类名。
+- 新增子任务详情渲染：任务目标、当前阶段、失败原因、
+  发现项与其来源依据、未检查项。
+
+**未调整**：`MAX_TOOL_ROUNDS` 仍为 4。
+一次批量派发算当前轮中的**一次**工具调用，不消耗额外轮次。
+
 ---
 
 ## 二、相对 baibaiAIGC（AGPL-3.0）
