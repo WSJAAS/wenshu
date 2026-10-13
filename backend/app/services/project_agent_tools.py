@@ -256,6 +256,40 @@ class ProjectAgentToolRegistry:
                 risk_level=2,
                 resources=("chapters", "outlines"),
             ),
+            ProjectAgentTool(
+                "dispatch_subagents",
+                "把只读的检查任务派发给多个子代理并发执行，执行期间会实时上报进度。"
+                "子代理只能读取你指定的章节文本，不能修改任何数据。"
+                "适用于跨章节一致性检查：一次派发多个子任务，各自检查不同章节，"
+                "由你汇总它们的发现后回答用户。",
+                _object_schema({
+                    "objective": {
+                        "type": "string",
+                        "description": "本次派发的总体目标，子任务未单独指定 objective 时使用",
+                    },
+                    "tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": _object_schema({
+                            "task_type": {
+                                "type": "string",
+                                "enum": ["consistency_check"],
+                                "description": "任务类型，首期仅支持 consistency_check",
+                            },
+                            "objective": {"type": "string"},
+                            "chapter_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 1,
+                                "maxItems": 5,
+                                "description": "要检查的章节 ID 列表",
+                            },
+                        }, ["chapter_ids"]),
+                    },
+                }, ["tasks"]),
+                # risk_level=0：只读，不进入批准流程
+            ),
         ]
         tools.extend(ProjectAgentTool(**spec) for spec in EXTENDED_TOOL_SPECS)
         tools.extend(ProjectAgentTool(**spec) for spec in OPERATIONAL_TOOL_SPECS)

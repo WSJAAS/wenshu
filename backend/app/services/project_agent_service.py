@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.project import Project
+from app.models.chapter import Chapter
 from app.models.project_agent import (
     AgentConversation,
     AgentExecutionStep,
@@ -18,6 +19,10 @@ from app.models.project_agent import (
 from app.services.ai_service import AIService
 from app.services.project_agent_tools import ProjectAgentToolRegistry
 from app.services.project_agent_selectors import normalize_tool_arguments
+
+# 子代理派发工具名。该工具不走 registry.execute，
+# 而是在 project_agent_service 中有专门的流式分支处理。
+DISPATCH_SUBAGENTS_TOOL = "dispatch_subagents"
 
 
 SYSTEM_PROMPT = """你是 MuMuAINovel 的“木木创作助手”，帮助用户查看和修改当前小说项目。
@@ -498,6 +503,30 @@ class ProjectAgentService:
                         }
                     continue
 
+                # ============================================================
+                #  子代理派发：执行期间逐个子任务转发进度
+                #
+                #  与普通工具的区别：普通工具是 await 完成后才发一次更新，
+                #  子任务需要在**执行过程中**就报告，否则前端时间线会长时间静止。
+                #  因此这里单独成一个流式分支，直接 yield step_start/step_update。
+                # ============================================================
+                if name == DISPATCH_SUBAGENTS_TOOL:
+                    async for event in self._dispatch_subagents_stream(
+                        conversation=conversation,
+                        user_message=user_message,
+                        tool_step=tool_step,
+                        record=record,
+                        arguments=arguments,
+                        sequence=sequence,
+                        tool_context=tool_context,
+                        steps=steps,
+                    ):
+                        yield event
+                        # 派发过程中可能创建了新步骤，同步推进 sequence
+                        if event.get("type") == "step_start":
+                            sequence += 1
+                    continue
+
                 try:
                     result = await self.registry.execute(name, arguments)
                     record.status = "executed"
@@ -630,6 +659,293 @@ class ProjectAgentService:
             .limit(self.HISTORY_LIMIT)
         )
         return list(reversed(result.scalars().all()))
+
+    async def _dispatch_subagents_stream(
+        self,
+        *,
+        conversation: AgentConversation,
+        user_message: AgentMessage,
+        tool_step: AgentExecutionStep,
+        record: AgentToolCall,
+        arguments: dict[str, Any],
+        sequence: int,
+        tool_context: list[dict[str, Any]],
+        steps: list[AgentExecutionStep],
+    ):
+        """派发子任务并在执行期间转发进度。
+
+        事件职责边界：
+        - 子任务只产出内部进度（start/done/error/all_done）
+        - **本方法**负责把内部进度转换成 step_start / step_update 并保存步骤
+        - final_* 只由主 Agent 发送，子任务不碰
+
+        只读保证：子任务只拿到这里固化的文本快照，
+        不获得 db 会话、不获得写工具、不获得 MCP 工具。
+        """
+        from app.services.subagent_contract import (
+            DEFAULT_LIMITS,
+            SubagentTask,
+            TASK_TYPE_LABELS,
+            TurnBudget,
+            validate_task,
+        )
+        from app.services.subagent_executor import make_task_id, run_batch
+
+        # ---- 预算：整轮账本挂在会话上，重复派发共享同一份额度 ----
+        budget: TurnBudget = getattr(self, "_turn_budget", None)
+        if budget is None:
+            budget = TurnBudget(limits=DEFAULT_LIMITS)
+            self._turn_budget = budget
+
+        raw_tasks = arguments.get("tasks") or []
+        objective_default = str(arguments.get("objective") or "").strip()
+
+        # ---- 构建任务：主流程读取章节，固化快照 ----
+        tasks: list[SubagentTask] = []
+        prepare_errors: list[str] = []
+        for idx, item in enumerate(raw_tasks, start=1):
+            if not isinstance(item, dict):
+                prepare_errors.append(f"第 {idx} 项不是对象，已跳过")
+                continue
+            try:
+                task = await self._build_subagent_task(item, idx, objective_default)
+            except Exception as exc:
+                prepare_errors.append(f"第 {idx} 项准备失败：{exc}")
+                continue
+            tasks.append(task)
+
+        if not tasks:
+            record.status = "failed"
+            record.error_message = "；".join(prepare_errors) or "没有可派发的子任务"
+            await self._update_step(
+                tool_step,
+                content=record.error_message,
+                status="failed",
+                detail={"arguments": self._display_value(arguments)},
+            )
+            yield {"type": "step_update", "data": self._step_data(tool_step)}
+            tool_context.append({"tool": DISPATCH_SUBAGENTS_TOOL, "error": record.error_message})
+            return
+
+        # ---- 预检预算：超限直接失败，不消耗额度 ----
+        try:
+            budget.reserve(len(tasks))
+        except Exception as exc:
+            budget.release()
+            record.status = "failed"
+            record.error_message = str(exc)
+            await self._update_step(
+                tool_step, content=f"派发被拒绝：{exc}", status="failed",
+            )
+            yield {"type": "step_update", "data": self._step_data(tool_step)}
+            tool_context.append({"tool": DISPATCH_SUBAGENTS_TOOL, "error": str(exc)})
+            return
+        budget.release()  # 交给 run_batch 真正预留
+
+        await self._update_step(
+            tool_step,
+            content=f"正在并发执行 {len(tasks)} 个子任务。",
+            status="running",
+            detail={
+                "arguments": self._display_value(arguments),
+                "subagent_tasks": [t.task_id for t in tasks],
+                "budget": budget.to_dict(),
+            },
+        )
+        yield {"type": "step_update", "data": self._step_data(tool_step)}
+
+        # ---- 为每个子任务建立独立步骤 ----
+        child_steps: dict[str, AgentExecutionStep] = {}
+        base_seq = sequence
+        for offset, task in enumerate(tasks, start=1):
+            child = await self._create_step(
+                conversation,
+                user_message,
+                base_seq + offset,
+                step_type="subagent",
+                category="analysis",
+                title=task.objective or TASK_TYPE_LABELS.get(task.task_type, "子任务"),
+                content="排队中。",
+                status="running",
+                detail={
+                    "task_id": task.task_id,
+                    "task_type": task.task_type,
+                    "task_type_label": TASK_TYPE_LABELS.get(task.task_type, task.task_type),
+                    "parent_tool_call_id": record.id,
+                    "stage": "排队中",
+                },
+                steps=steps,
+            )
+            child_steps[task.task_id] = child
+            # 立即发出 step_start：前端据此把子任务插入时间线，
+            # 不必等第一次 update 才出现（缺失 start 会导致步骤无处可更新）。
+            yield {"type": "step_start", "data": self._step_data(child)}
+
+        # ---- 逐个转发进度 ----
+        final_summary: dict[str, Any] | None = None
+        async for ev in run_batch(
+            tasks,
+            self.ai_service,
+            limits=DEFAULT_LIMITS,
+            budget=budget,
+            cancel_event=getattr(self, "_cancel_event", None),
+        ):
+            kind = ev.get("kind")
+            task_id = ev.get("task_id")
+
+            if kind == "start":
+                child = child_steps.get(task_id)
+                if child is not None:
+                    await self._update_step(
+                        child,
+                        content="正在检查…",
+                        status="running",
+                        detail={
+                            **(child.detail or {}),
+                            "stage": "执行中",
+                            "objective": ev.get("objective"),
+                        },
+                    )
+                    yield {"type": "step_update", "data": self._step_data(child)}
+
+            elif kind in ("done", "error"):
+                child = child_steps.get(task_id)
+                if child is None:
+                    continue
+                result = ev.get("result") or {}
+                status = ev.get("status") or "failed"
+                findings = result.get("findings") or []
+                unchecked = result.get("unchecked") or []
+
+                if status == "completed":
+                    content = (
+                        f"检查完成，发现 {len(findings)} 项。"
+                        if findings
+                        else "检查完成，未发现问题。"
+                    )
+                    step_status = "completed"
+                elif status == "cancelled":
+                    content = "已取消。"
+                    step_status = "cancelled"
+                else:
+                    content = f"执行失败：{ev.get('error') or '未知错误'}"
+                    step_status = "failed"
+
+                if unchecked:
+                    content += f"（{len(unchecked)} 项未检查）"
+
+                await self._update_step(
+                    child,
+                    content=content,
+                    status=step_status,
+                    detail={
+                        **(child.detail or {}),
+                        "stage": "已结束",
+                        "result": result,
+                        "finding_count": len(findings),
+                        "unchecked": unchecked,
+                    },
+                )
+                yield {"type": "step_update", "data": self._step_data(child)}
+
+            elif kind == "all_done":
+                final_summary = ev
+
+        # ---- 汇报给主 Agent：只回摘要，避免完整结果挤占上下文 ----
+        summary = (final_summary or {}).get("summary") or []
+        failed = (final_summary or {}).get("failed") or []
+        cancelled = (final_summary or {}).get("cancelled") or []
+
+        record.status = "executed"
+        record.result = {
+            "total": len(tasks),
+            "failed": failed,
+            "cancelled": cancelled,
+            "summary": summary,
+            "budget": (final_summary or {}).get("budget"),
+        }
+        record.executed_at = datetime.now()
+
+        done_count = len(tasks) - len(failed) - len(cancelled)
+        parts = [f"子任务执行完毕：{done_count}/{len(tasks)} 完成"]
+        if failed:
+            parts.append(f"{len(failed)} 个失败")
+        if cancelled:
+            parts.append(f"{len(cancelled)} 个取消")
+        if prepare_errors:
+            parts.append(f"{len(prepare_errors)} 个未派发")
+        note = "，".join(parts) + "。"
+
+        await self._update_step(
+            tool_step,
+            content=note,
+            status="completed" if not failed else "failed",
+            detail={
+                "arguments": self._display_value(arguments),
+                "result": self._display_value(record.result),
+                "tool_call": self._tool_call_data(record),
+                "budget": budget.to_dict(),
+            },
+        )
+        yield {"type": "step_update", "data": self._step_data(tool_step)}
+
+        tool_context.append({
+            "tool": DISPATCH_SUBAGENTS_TOOL,
+            "arguments": arguments,
+            "result": record.result,
+        })
+
+    async def _build_subagent_task(
+        self,
+        item: dict[str, Any],
+        index: int,
+        objective_default: str,
+    ) -> Any:
+        """由主流程读取并校验数据，固化成子任务快照。
+
+        子任务拿到的只是文本，没有任何数据库能力。
+        """
+        from app.services.subagent_contract import SubagentTask
+        from app.services.subagent_executor import make_task_id
+
+        task_type = str(item.get("task_type") or "consistency_check").strip()
+        objective = str(item.get("objective") or objective_default or "一致性检查").strip()
+
+        chapter_ids = item.get("chapter_ids") or []
+        if isinstance(chapter_ids, str):
+            chapter_ids = [chapter_ids]
+
+        if not chapter_ids:
+            raise ValueError("必须指定 chapter_ids")
+
+        sources: list[dict[str, Any]] = []
+        for cid in chapter_ids[:5]:  # 单任务最多取 5 章，避免输入失控
+            result = await self.db.execute(
+                select(Chapter).where(
+                    Chapter.project_id == self.project.id,
+                    Chapter.id == str(cid),
+                )
+            )
+            chapter = result.scalar_one_or_none()
+            if chapter is None:
+                raise ValueError(f"章节不存在或不属于本项目：{cid}")
+            sources.append({
+                "kind": "chapter",
+                "id": chapter.id,
+                "label": f"第{chapter.chapter_number}章 {chapter.title or ''}".strip(),
+                "text": (chapter.content or "")[:8000],
+            })
+
+        if not sources:
+            raise ValueError("没有可用的章节内容")
+
+        return SubagentTask(
+            task_id=make_task_id(f"sa{index}"),
+            task_type=task_type,
+            objective=objective,
+            sources=sources,
+            constraints={"project_title": self.project.title},
+        )
 
     async def _create_step(
         self,

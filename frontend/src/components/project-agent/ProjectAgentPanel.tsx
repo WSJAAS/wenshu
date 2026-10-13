@@ -2,6 +2,7 @@ import {
   CheckOutlined,
   CheckCircleOutlined,
   ApiOutlined,
+  ApartmentOutlined,
   BulbOutlined,
   CloseOutlined,
   CloseCircleOutlined,
@@ -302,9 +303,20 @@ export default function ProjectAgentPanel({
           { ...step, assistant_message_id: step.assistant_message_id || assistantId },
         ]),
         onStepUpdate: step => {
-          setExecutionSteps(items => items.map(item => item.id === step.id
-            ? { ...step, assistant_message_id: step.assistant_message_id || assistantId }
-            : item));
+          // 真正的 upsert：上游仅用 map 更新，缺少 start 的步骤（如子代理派发时
+          // 由后端补建的步骤）会被静默忽略，进度就永远不显示。
+          // 这里改为「存在则更新，不存在则补建」，并按 sequence 稳定排序。
+          setExecutionSteps(items => {
+            const idx = items.findIndex(item => item.id === step.id);
+            const merged = {
+              ...step,
+              assistant_message_id: step.assistant_message_id || assistantId,
+            };
+            const next = idx >= 0
+              ? items.map(item => (item.id === step.id ? merged : item))
+              : [...items, merged];
+            return next.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+          });
           const toolCall = step.detail?.tool_call as AgentToolCall | undefined;
           if (toolCall) {
             setToolCalls(items => [...items.filter(item => item.id !== toolCall.id), toolCall]);
@@ -487,6 +499,13 @@ export default function ProjectAgentPanel({
   }), [conversations, loadConversation]);
 
   const renderStepIcon = (step: AgentExecutionStep) => {
+    // 子代理步骤优先于 category 判断，否则会被当成「思考摘要」
+    if (step.step_type === 'subagent') {
+      if (step.status === 'running') return <LoadingOutlined spin style={{ color: token.colorInfo }} />;
+      if (step.status === 'failed') return <CloseCircleOutlined style={{ color: token.colorError }} />;
+      if (step.status === 'cancelled') return <StopOutlined style={{ color: token.colorTextSecondary }} />;
+      return <ApartmentOutlined style={{ color: token.colorInfo }} />;
+    }
     if (step.status === 'running') return <LoadingOutlined spin style={{ color: token.colorPrimary }} />;
     if (step.status === 'failed') return <CloseCircleOutlined style={{ color: token.colorError }} />;
     if (step.status === 'cancelled') return <StopOutlined style={{ color: token.colorTextSecondary }} />;
@@ -503,7 +522,69 @@ export default function ProjectAgentPanel({
     project: '项目工具',
     mcp: 'MCP',
     skill: 'Skill',
+    subagent: '子任务',
   }[category] || '工具');
+
+  /** 子代理步骤的详情：任务目标、当前阶段、失败原因、发现项 */
+  const renderSubagentDetail = (step: AgentExecutionStep) => {
+    if (step.step_type !== 'subagent') return null;
+    const d = (step.detail || {}) as Record<string, unknown>;
+    const stage = typeof d.stage === 'string' ? d.stage : '';
+    const typeLabel = typeof d.task_type_label === 'string' ? d.task_type_label : '';
+    const result = (d.result || {}) as Record<string, unknown>;
+    const findings = (result.findings || []) as Array<Record<string, unknown>>;
+    const unchecked = ((result.unchecked || d.unchecked || []) as unknown[]).filter(Boolean);
+
+    return (
+      <div style={{ marginTop: 6, fontSize: 12 }}>
+        <Space size={6} wrap>
+          {typeLabel && <Tag color="blue" style={{ fontSize: 11 }}>{typeLabel}</Tag>}
+          {stage && <Tag style={{ fontSize: 11 }}>{stage}</Tag>}
+          {typeof d.task_id === 'string' && (
+            <Text type="secondary" style={{ fontSize: 11 }}>{d.task_id}</Text>
+          )}
+        </Space>
+
+        {findings.length > 0 && (
+          <div style={{ marginTop: 8 }}>
+            {findings.map((f, i) => (
+              <div key={i} style={{ marginTop: 6, paddingLeft: 8, borderLeft: `2px solid ${token.colorWarningBorder}` }}>
+                <Text style={{ fontSize: 12 }}>
+                  {f.severity === 'error' ? '⛔ ' : f.severity === 'warning' ? '⚠️ ' : 'ℹ️ '}
+                  {String(f.summary || '')}
+                </Text>
+                {Array.isArray(f.source_refs) && f.source_refs.length > 0 && (
+                  <div style={{ marginTop: 2 }}>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      依据：
+                      {(f.source_refs as Array<Record<string, unknown>>)
+                        .map(r => String(r.label || r.id || '')).filter(Boolean).join('、')}
+                    </Text>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {unchecked.length > 0 && (
+          <div style={{ marginTop: 8 }}>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              未检查 {unchecked.length} 项：{unchecked.slice(0, 3).map(String).join('；')}
+            </Text>
+          </div>
+        )}
+
+        {step.status === 'failed' && (
+          <div style={{ marginTop: 6 }}>
+            <Text type="danger" style={{ fontSize: 11 }}>
+              失败原因：{step.content || '未知'}
+            </Text>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const renderChangePreview = (toolCall?: AgentToolCall) => {
     if (!toolCall?.preview) return null;
@@ -643,6 +724,7 @@ export default function ProjectAgentPanel({
                           {step.content}
                         </Text>
                       )}
+                      {renderSubagentDetail(step)}
                       {hasDetail && (
                         <details style={{ marginTop: 7, fontSize: 12 }}>
                           <summary style={{ cursor: 'pointer', color: token.colorTextSecondary }}>查看参数与结果</summary>
