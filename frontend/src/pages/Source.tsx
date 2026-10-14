@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   Alert,
   Badge,
@@ -45,9 +45,11 @@ import {
   SearchOutlined,
   InfoCircleOutlined,
   WarningOutlined,
+  LinkOutlined,
 } from '@ant-design/icons';
-import { sourceApi } from '../services/api';
+import { sourceApi, bookImportApi } from '../services/api';
 import type {
+  BookImportTask,
   SourceBookResponse,
   SourceChapterResult,
   SourceHandoverGuide,
@@ -61,6 +63,16 @@ import type {
 import './Source.css';
 
 const { Text, Title, Paragraph } = Typography;
+
+/**
+ * 番茄站点的入口地址。
+ *
+ * 写死在这里而不是从后端取：这两个地址是平台公开的常规入口，
+ * 不需要随抓取逻辑变化；而且按钮要在接口失败时也能用 ——
+ * 后端连不上时，用户更需要能自己打开番茄去看看。
+ */
+const FANQIE_HOME = 'https://fanqienovel.com/';
+const FANQIE_RANK = 'https://fanqienovel.com/rank';
 
 /** 逐章状态的展示样式 */
 const STATUS_META: Record<string, { color: string; label: string }> = {
@@ -83,6 +95,15 @@ const TASK_STATUS_META: Record<string, { color: string; label: string }> = {
   completed: { color: 'success', label: '已完成' },
   failed: { color: 'error', label: '失败' },
   cancelled: { color: 'default', label: '已取消' },
+};
+
+/** 拆书模块的任务状态文案 */
+const BOOK_IMPORT_STATUS_LABEL: Record<string, string> = {
+  pending: '等待处理',
+  running: '处理中',
+  completed: '可预览导入',
+  failed: '失败',
+  cancelled: '已取消',
 };
 
 function fmtCount(n: number | undefined): string {
@@ -118,6 +139,7 @@ export default function Source() {
   const { token } = theme.useToken();
   const screens = Grid.useBreakpoint();
   const isMobile = !screens.md;
+  const navigate = useNavigate();
   const [msgApi, ctxHolder] = message.useMessage();
 
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -155,6 +177,9 @@ export default function Source() {
 
   /** 浏览器联动的安装指引。拿不到就不显示这一块。 */
   const [guide, setGuide] = useState<SourceHandoverGuide | null>(null);
+
+  /** 交接后拆书模块那边的任务状态。用于显示对方的反应。 */
+  const [importTask, setImportTask] = useState<BookImportTask | null>(null);
 
   const categories = useMemo(
     () => [...new Set((rank?.items ?? []).map((item) => item.category).filter((value): value is string => !!value))],
@@ -347,6 +372,37 @@ export default function Source() {
     return () => window.clearInterval(tick);
   }, [task?.task_id, task?.status]);
 
+  // ---- 拆书任务轮询 ----
+  // 交接之后轮询对面的状态，直到跑完。
+  // 这是「拆书模块有反应」的可见来源：用户能看到对方在解析、能预览了、还是失败了。
+  useEffect(() => {
+    const biId = task?.import_task_id;
+    if (!biId) {
+      setImportTask(null);
+      return;
+    }
+    if (importTask && ['completed', 'failed', 'cancelled'].includes(importTask.status)) {
+      return;
+    }
+
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const t = await bookImportApi.getTaskStatus(biId);
+        if (!stopped) setImportTask(t);
+      } catch {
+        /* 拿不到就下次再试 */
+      }
+    };
+
+    void tick();
+    const timer = window.setInterval(tick, 3000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [task?.import_task_id, importTask?.status]);
+
   const cancelTask = async () => {
     if (!task) return;
     try {
@@ -447,7 +503,29 @@ export default function Source() {
           <Title level={2} className="source-title">番茄小说榜单</Title>
           <Text type="secondary">看看大家在读什么，点开一本了解更多。</Text>
         </div>
-        <Button icon={<ReloadOutlined />} onClick={loadRank} loading={loadingRank}>刷新榜单</Button>
+        <Space wrap>
+          {/* 去番茄的入口。登录、选书都要在那边操作，
+              放在这里省得用户自己去找地址。 */}
+          <Button
+            icon={<LinkOutlined />}
+            href={FANQIE_HOME}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            打开番茄小说
+          </Button>
+          <Button
+            icon={<ReadOutlined />}
+            href={FANQIE_RANK}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            番茄排行榜
+          </Button>
+          <Button icon={<ReloadOutlined />} onClick={loadRank} loading={loadingRank}>
+            刷新榜单
+          </Button>
+        </Space>
       </header>
 
       {/* ---------- 登录态 ----------
@@ -472,8 +550,28 @@ export default function Source() {
                 <Paragraph style={{ fontSize: 12, marginBottom: 8 }}>
                   番茄对未登录访问只开放每本书前 10 章全文，第 11 章起一律
                   截断为约 200 字符的预览（页面提示「会员登录后，可在网页畅读全文」）。
-                  要取整本，需要在下方填入浏览器登录后的 Cookie。
+                  要取整本，需要先登录番茄，再把登录态交给这里。
                 </Paragraph>
+
+                {/* 先去番茄登录，再回来取登录态。按顺序摆，避免用户跳错。 */}
+                <Space wrap style={{ marginBottom: 10 }}>
+                  <Button
+                    size="small"
+                    type={login.has_sessionid ? 'default' : 'primary'}
+                    icon={<LinkOutlined />}
+                    href={FANQIE_HOME}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    1. 去番茄登录
+                  </Button>
+                  {!login.has_sessionid && (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      登录后回到本页，用下面的方式把登录态交给文枢
+                    </Text>
+                  )}
+                </Space>
+
                 <Space.Compact style={{ width: '100%', maxWidth: 720 }}>
                   <Input.Password
                     value={loginInput}
@@ -889,6 +987,114 @@ export default function Source() {
               type="warning" showIcon style={{ marginTop: 12 }}
               message="任务已暂停"
               description="服务重启会中断抓取。已抓到的章节已保存，重新发起同范围任务时会跳过它们。"
+            />
+          )}
+
+          {/* ---------- 拆书模块的反应 ----------
+              抓完自动交给拆书后，这里显示对方的状态。
+              没有这一块的话，从书源侧看不到交接之后发生了什么，
+              用户只能凭「已完成」猜后续跑没跑。 */}
+          {task.import_status === 'handed' && task.import_task_id && (
+            <Alert
+              type="success"
+              showIcon
+              icon={<ImportOutlined />}
+              style={{ marginTop: 12 }}
+              message={
+                <Space wrap>
+                  <span>已交给拆书模块</span>
+                  {importTask && (
+                    <Tag color={
+                      importTask.status === 'completed' ? 'green'
+                        : importTask.status === 'failed' ? 'red'
+                        : 'blue'
+                    }>
+                      {BOOK_IMPORT_STATUS_LABEL[importTask.status] || importTask.status}
+                    </Tag>
+                  )}
+                </Space>
+              }
+              description={
+                <div>
+                  <Paragraph style={{ fontSize: 12, marginBottom: 8 }}>
+                    {task.import_message}
+                  </Paragraph>
+                  {importTask && (
+                    <>
+                      <Progress
+                        percent={importTask.progress ?? 0}
+                        size="small"
+                        status={
+                          importTask.status === 'failed' ? 'exception'
+                            : importTask.status === 'completed' ? 'success'
+                            : 'active'
+                        }
+                      />
+                      {importTask.message && (
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {importTask.message}
+                        </Text>
+                      )}
+                      {importTask.ai_degraded && (
+                        <div style={{ marginTop: 6 }}>
+                          <Tag color="orange" icon={<WarningOutlined />}>
+                            未使用 AI
+                          </Tag>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            产出为规则推断
+                            {importTask.ai_fallback_reasons?.length
+                              ? `（${importTask.ai_fallback_reasons.join('、')}）`
+                              : ''}
+                          </Text>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  <div style={{ marginTop: 10 }}>
+                    <Space wrap>
+                      <Button
+                        size="small"
+                        icon={<RightOutlined />}
+                        onClick={() => navigate('/?view=book-import')}
+                      >
+                        去拆书模块确认导入
+                      </Button>
+                      <Button
+                        size="small"
+                        icon={<ImportOutlined />}
+                        onClick={() => void handoff()}
+                      >
+                        重新交接
+                      </Button>
+                    </Space>
+                  </div>
+                </div>
+              }
+            />
+          )}
+
+          {task.import_status === 'failed' && (
+            <Alert
+              type="warning"
+              showIcon
+              icon={<WarningOutlined />}
+              style={{ marginTop: 12 }}
+              message="交给拆书模块失败"
+              description={
+                <div>
+                  <Paragraph style={{ fontSize: 12, marginBottom: 8 }}>
+                    {task.import_message || '未知原因'}
+                  </Paragraph>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    抓取本身是成功的，正文已保存。可以重试交接。
+                  </Text>
+                  <div style={{ marginTop: 8 }}>
+                    <Button size="small" onClick={() => void handoff()}>
+                      重试
+                    </Button>
+                  </div>
+                </div>
+              }
             />
           )}
         </Card>

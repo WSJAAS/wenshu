@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import Column, DateTime, Integer, String, Text, select
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -80,6 +80,20 @@ class SourceTask(Base):
     chapters_digest = Column(String(64), default="")
     # 目录快照
     catalog_json = Column(Text, default="[]")
+
+    # ---------- 与拆书模块的衔接 ----------
+    #
+    # 记录本任务的正文有没有交出去、交成了没。
+    # 没有这几个字段的话，从取源侧看不到拆书那一步的结果，
+    # 用户点了「交给拆书导入」之后这边还是一句「已完成」，
+    # 无法判断后续到底跑没跑。
+    import_task_id = Column(String(36), default="")     # 拆书任务 ID
+    import_status = Column(String(20), default="")      # 未交接 / 已交接 / 已导入 / 失败
+    import_message = Column(String(500), default="")
+    imported_at = Column(DateTime, nullable=True)
+    # 抓取完成后是否自动交给拆书模块。默认开 —— 用户交接一本书，
+    # 本意就是要分析它，不该再点一次。
+    auto_import = Column(Boolean, default=True, nullable=False)
     # 书籍信息快照
     book_json = Column(Text, default="{}")
 
@@ -135,6 +149,13 @@ class TaskSummary(BaseModel):
     failed_count: int = 0
     # 内容指纹：验证任务隔离与迁移一致性
     chapters_digest: str = ""
+    # 与拆书模块的衔接状态
+    import_task_id: str = ""
+    import_status: str = ""
+    import_message: str = ""
+    imported_at: Optional[datetime] = None
+    # 抓完后是否自动交给拆书模块
+    auto_import: bool = True
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -216,6 +237,11 @@ def _task_to_summary(t: SourceTask) -> TaskSummary:
         ok_count=t.ok_count or 0,
         failed_count=t.failed_count or 0,
         chapters_digest=getattr(t, "chapters_digest", "") or "",
+        import_task_id=getattr(t, "import_task_id", "") or "",
+        import_status=getattr(t, "import_status", "") or "",
+        import_message=getattr(t, "import_message", "") or "",
+        imported_at=getattr(t, "imported_at", None),
+        auto_import=bool(getattr(t, "auto_import", True)),
         created_at=t.created_at,
         updated_at=t.updated_at,
     )
@@ -411,16 +437,20 @@ async def get_rank(
                 # 明确标记出来，避免把乱码当正常书名展示。
                 it["enriched"] = False
                 it["enrich_error"] = str(e)[:120]
-                fallback = it.get("title_decoded") or it.get("title_raw") or ""
-                it["title"] = fallback
-                it["title_may_be_garbled"] = any(
-                    0xE000 <= ord(c) <= 0xF8FF for c in fallback
-                )
+                # 解析层已经填好了 title 与 title_may_be_garbled，这里保持原样。
+                # 早期实现在此处重算，反而可能把解析层的判定覆盖掉。
+                if not it.get("title"):
+                    it["title"] = it.get("title_decoded") or it.get("title_raw") or ""
                 continue
 
             it["enriched"] = True
-            it["title"] = book.title or it.get("title_decoded") or it.get("title_raw") or ""
-            it["title_may_be_garbled"] = False
+            # 详情页书名干净，优先用它。
+            # 但详情页也可能偶尔缺书名，此时保留解析层的值，不要写成空。
+            it["title"] = book.title or it.get("title") or ""
+            # 只有在确实用了详情页书名时，才能说它不乱码
+            it["title_may_be_garbled"] = not bool(book.title) and bool(
+                it.get("title_may_be_garbled")
+            )
             it["author"] = book.author or it.get("author", "")
             it["category"] = book.category
             it["tags"] = book.tags
@@ -530,6 +560,9 @@ async def create_source_task(
         requested_ranges=json.dumps(payload.selection.model_dump(), ensure_ascii=False),
         book_json=json.dumps(book.to_dict(), ensure_ascii=False),
         catalog_json=json.dumps([c.to_dict() for c in chapters], ensure_ascii=False),
+        # 书源页面创建的任务同样默认抓完自动交接。
+        # 两条入口行为要一致，否则从网页交接和从榜单创建会得到不同结果。
+        auto_import=True,
     )
     db.add(task)
     await db.commit()
@@ -633,6 +666,39 @@ async def _run_task(
 
             await db.commit()
             logger.info("取源任务 %s 结束：%s", task_id, task.message)
+
+            # ---------- 自动交给拆书模块 ----------
+            #
+            # 抓完就交，不用用户再点一次。
+            # 但要满足两个前提，否则不自动做：
+            #   - 有完整正文（只有试读片段时交过去没有意义）
+            #   - 用户没关掉自动交接（auto_import 字段）
+            #
+            # 失败不改变任务本身的终态 —— 抓取是成功的，
+            # 只是交接这一步没成，两者要分开记。
+            if (
+                task.status == "completed"
+                and ok > 0
+                and bool(getattr(task, "auto_import", True))
+            ):
+                try:
+                    res = await _hand_to_book_import(task, task.user_id)
+                    task.import_task_id = res["import_task_id"]
+                    task.import_status = "handed"
+                    task.import_message = (
+                        f"抓取完成后自动交接：完整 {res['handed_chapters']} 章"
+                        + (f"，另 {res['preview_chapters']} 章为试读片段"
+                           if res["preview_chapters"] else "")
+                        + f"，共 {res['txt_chars']} 字"
+                    )
+                    task.imported_at = datetime.utcnow()
+                    logger.info("取源任务 %s 已自动交接拆书：%s",
+                                task_id, res["import_task_id"])
+                except Exception as e:
+                    task.import_status = "failed"
+                    task.import_message = f"自动交接失败：{type(e).__name__}: {e}"[:500]
+                    logger.warning("取源任务 %s 自动交接失败：%s", task_id, e)
+                await db.commit()
 
     except Exception as e:
         logger.error("取源任务 %s 异常: %s", task_id, e)
@@ -832,23 +898,18 @@ async def cancel_source_task(
 # ============================================================
 #  与拆书导入衔接
 # ============================================================
-@router.post("/tasks/{task_id}/to-book-import", summary="把取源结果交给拆书导入")
-async def handoff_to_book_import(
-    task_id: str,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    extract_mode: str = Query(default="full", description="解析范围，在线取源已选定内容，固定用 full"),
-):
-    """把抓取到的原文直接交给现有拆书导入管线。
+async def _hand_to_book_import(
+    t: SourceTask,
+    user_id: str,
+) -> dict[str, Any]:
+    """把取源结果交给拆书导入。返回交接结果。
 
-    这是书源与拆书之间的衔接点：书源负责拿到干净 TXT，
-    拆书负责把它变成项目（生成设定、人物、大纲）。
+    抽出来是因为有两条入口都要用它：用户手动点按钮，
+    以及抓取完成后自动交接。两处必须走同一套逻辑，
+    否则「自动」与「手动」的行为会分叉。
+
+    调用方负责写 import_* 字段与提交。
     """
-    _require_enabled()
-    t = await db.get(SourceTask, task_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
-
     ok_count = t.ok_count or 0
     if ok_count == 0:
         raise HTTPException(
@@ -856,18 +917,14 @@ async def handoff_to_book_import(
             detail="该任务没有可用正文，无法导入。请先确认抓取结果。",
         )
 
-    catalog = _load_catalog(t)
     results = _load_chapters(t)
     targets = _resolve_targets(t)
-
     txt = results_to_txt(targets, results)
     if not txt.strip():
         raise HTTPException(status_code=400, detail="拼接出的文本为空")
 
-    user_id = getattr(request.state, "user_id", None) or "local"
-
     from app.services.book_import_service import book_import_service
-    task = await book_import_service.create_task(
+    bi_task = await book_import_service.create_task(
         user_id=user_id,
         filename=f"{t.book_title or t.book_id}.txt",
         file_content=txt.encode("utf-8"),
@@ -879,19 +936,68 @@ async def handoff_to_book_import(
         tail_chapter_count=10,
     )
 
+    bi_id = getattr(bi_task, "task_id", "") or ""
+    full = len([c for c in targets if c.item_id in results
+                and results[c.item_id].status == "ok"])
+    preview = len([c for c in targets if c.item_id in results
+                   and results[c.item_id].status == "preview"])
+
     return {
         "ok": True,
         "book_title": t.book_title,
-        "handed_chapters": len([c for c in targets if c.item_id in results
-                                and results[c.item_id].status == "ok"]),
+        "handed_chapters": full,
         # 只拿到试读片段的章数。拆书导入拿到的是残缺正文时，
         # 需要知道有多少内容是截断的。
-        "preview_chapters": len([c for c in targets if c.item_id in results
-                                 and results[c.item_id].status == "preview"]),
+        "preview_chapters": preview,
         "txt_chars": len(txt),
-        "book_import_task": task.model_dump() if hasattr(task, "model_dump") else task,
+        "book_import_task": bi_task.model_dump() if hasattr(bi_task, "model_dump") else bi_task,
+        "import_task_id": bi_id,
         "note": "已交给拆书导入。后续在该任务的预览里确认并导入。",
     }
+
+
+@router.post("/tasks/{task_id}/to-book-import", summary="把取源结果交给拆书导入")
+async def handoff_to_book_import(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    extract_mode: str = Query(default="full", description="解析范围，在线取源已选定内容，固定用 full"),
+):
+    """把抓取到的原文直接交给现有拆书导入管线。
+
+    这是书源与拆书之间的衔接点：书源负责拿到干净 TXT，
+    拆书负责把它变成项目（生成设定、人物、大纲）。
+
+    重复调用是安全的：会把旧的拆书任务替换成新的一次。
+    """
+    _require_enabled()
+    t = await db.get(SourceTask, task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    user_id = getattr(request.state, "user_id", None) or "local"
+
+    try:
+        result = await _hand_to_book_import(t, user_id)
+    except HTTPException as e:
+        # 交接失败也要留痕，否则从取源侧看不到「试过但没成」
+        t.import_status = "failed"
+        t.import_message = str(e.detail)[:500]
+        await db.commit()
+        raise
+
+    t.import_task_id = result["import_task_id"]
+    t.import_status = "handed"
+    t.import_message = (
+        f"已交接：完整 {result['handed_chapters']} 章"
+        + (f"，另 {result['preview_chapters']} 章为试读片段"
+           if result["preview_chapters"] else "")
+        + f"，共 {result['txt_chars']} 字"
+    )
+    t.imported_at = datetime.utcnow()
+    await db.commit()
+
+    return result
 
 
 # ============================================================
@@ -910,9 +1016,12 @@ class HandoverRequest(BaseModel):
     author: str = Field(default="", description="作者（来自页面，仅作参考）")
     chapter_total: int = Field(default=0, description="章节总数（来自页面）")
     source_url: str = Field(default="", description="来源页面地址")
-    # 是否立即建取源任务。默认只登记，让用户在文枢里确认范围
-    create_task: bool = Field(default=False, description="是否立即抓取")
-    chapter_count: int = Field(default=10, ge=1, le=3000, description="create_task 时抓多少章")
+    # 默认直接抓取并自动交给拆书。
+    # 用户在网页上「交给文枢」的本意就是要分析这本书，
+    # 让它只登记、还要回到文枢再点两次，是把流程切碎了。
+    create_task: bool = Field(default=True, description="是否立即抓取")
+    chapter_count: int = Field(default=30, ge=1, le=3000, description="create_task 时抓多少章")
+    auto_import: bool = Field(default=True, description="抓完后是否自动交给拆书模块")
 
 
 @router.post("/handover", summary="接收浏览器交来的书（用户脚本调用）")
@@ -1013,6 +1122,7 @@ async def handover_from_browser(
             ),
             book_json=json.dumps(book.to_dict(), ensure_ascii=False),
             catalog_json=json.dumps([c.to_dict() for c in chapters], ensure_ascii=False),
+            auto_import=payload.auto_import,
         )
         db.add(task)
         await db.commit()
@@ -1025,9 +1135,11 @@ async def handover_from_browser(
             max_chapters=None,
         ))
         result["task_id"] = task.id
+        result["auto_import"] = payload.auto_import
         result["message"] = (
             (result["message"] + " " if result["message"] else "")
-            + f"已创建取源任务，将抓取前 {len(picked)} 章。"
+            + f"已开始抓取前 {len(picked)} 章。"
+            + ("抓完会自动交给拆书模块。" if payload.auto_import else "")
         )
         # 未登录时同样要提醒 —— 这条路径才是真去抓的，比只登记更需要说清
         if not can_full_text:

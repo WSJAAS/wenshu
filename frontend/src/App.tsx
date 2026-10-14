@@ -70,6 +70,8 @@ function App() {
             <Route path="skill-chat" element={<SkillChat />} />
             <Route path="skill-manage" element={<SkillManage />} />
             <Route path="polish" element={<Polish />} />
+            {/* 旧链接兜底：赞助页已移除，重定向到默认页 */}
+            <Route path="sponsor" element={<Navigate to="../world-setting" replace />} />
           </Route>
         </Routes>
       </BrowserRouter>

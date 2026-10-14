@@ -835,6 +835,16 @@ export interface SourceTask {
   done_count: number;
   ok_count: number;
   failed_count: number;
+  /** 内容指纹，用于验证任务隔离 */
+  chapters_digest?: string;
+  /** 交接给拆书模块后生成的拆书任务 ID */
+  import_task_id?: string;
+  /** 交接状态：'' 未交接 / handed 已交接 / failed 失败 */
+  import_status?: string;
+  import_message?: string;
+  imported_at?: string;
+  /** 抓完后是否自动交给拆书模块 */
+  auto_import?: boolean;
   created_at?: string;
   updated_at?: string;
 }
@@ -1424,6 +1434,16 @@ export interface BookImportTask {
   error?: string;
   created_at: string;
   updated_at: string;
+  /**
+   * AI 使用情况。
+   *
+   * 独立于 message 存在，因为 message 会被后续的进度更新覆盖掉：
+   * AI 失败时写了「使用规则推断」，但接下来「正在生成大纲」等消息
+   * 会把它冲掉，用户最终只看到一句中性提示。
+   */
+  ai_used?: boolean;
+  ai_degraded?: boolean;
+  ai_fallback_reasons?: string[];
 }
 
 export interface BookImportPreview {

@@ -92,21 +92,61 @@ CHAPTER_FETCH_TIMEOUT = 60
 #  这里只做「原样转发」，不解密、不代管账号；存哪由调用方决定
 #  （本项目存在工作区配置目录，不入库、不进 git）。
 # ============================================================
+def normalize_cookie(raw: str) -> str:
+    """清理 Cookie 串里的杂字符。
+
+    用户从浏览器或开发者工具复制 Cookie 时，容易带进两类东西：
+
+      1. 不可见格式字符（零宽空格 U+200B、BOM U+FEFF 等）。
+         它们会让 Cookie 名变成 `"\\u200bcsrf_session_id"`，
+         服务端认不出，表现为「配了登录态却抓不到」。
+
+      2. 整行复制时带上的 `Cookie:` 前缀，或整体包裹的引号。
+
+    段间用 `"; "` 分隔时分号后本来就有一个普通空格，那是正常的，
+    这里统一成 `"; "` 即可，不需要特殊处理。
+
+    注意：这两个问题都不是「带登录态反而解析失败」的原因 ——
+    那个是状态里含 JS 的 `undefined`，见 _js_literal_to_json。
+    保留本函数是为了让 Cookie 名干净、便于排查与统计。
+    """
+    if not raw:
+        return ""
+    # 不可见格式字符与软连字符去掉
+    for ch in ("\u200b", "\u200c", "\u200d", "\ufeff", "\u00ad"):
+        raw = raw.replace(ch, "")
+    # 全角空格与不换行空格还原成普通空格，便于按 ; 切分
+    raw = raw.replace("\u3000", " ").replace("\u00a0", " ")
+    s = raw.strip()
+    # 去掉可能被一起复制进来的 "Cookie:" 前缀
+    if s.lower().startswith("cookie:"):
+        s = s[7:].strip()
+    # 去掉整体包裹的引号
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        s = s[1:-1].strip()
+    # 各段去掉首尾空白，再统一用 "; " 连接
+    parts = [p.strip() for p in s.split(";") if p.strip()]
+    return "; ".join(parts)
+
+
 def load_login_cookie() -> str:
     """读取用户配置的登录 Cookie。
 
     顺序：环境变量 FANQIE_COOKIE > 配置文件。
     返回空字符串表示未配置（此时只能取到免费章）。
+
+    读出来的值一律经过 normalize_cookie —— 从浏览器复制时
+    常带入不可见字符，不清理会导致「看起来配了却抓不到」。
     """
     env = os.getenv("FANQIE_COOKIE", "").strip()
     if env:
-        return env
+        return normalize_cookie(env)
 
     path = _cookie_file_path()
     if path and os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return f.read().strip()
+                return normalize_cookie(f.read())
         except OSError as e:
             logger.warning("读取登录 Cookie 失败: %s", e)
     return ""
@@ -370,10 +410,89 @@ def _fetch_html_sync(url: str, timeout: int = DEFAULT_TIMEOUT,
         raise FanqieError(f"网络错误: {e.reason}") from e
 
 
+def _js_literal_to_json(text: str) -> str:
+    """把 JS 对象字面量里的非 JSON 值换成合法 JSON。
+
+    平台内嵌的状态是 `window.__INITIAL_STATE__ = {...}`，语法上是
+    **JavaScript 而不是 JSON**。实测带登录态访问阅读页时会出现：
+
+        {"libra":{"paywall_reverse_config":{"libra":undefined,"ready":true}}}
+
+    这个 `undefined` 是合法 JS、非法 JSON，`json.loads` 会直接报错，
+    导致整页状态取不出来 —— 症状是「带了登录态反而什么都解析不出」，
+    很容易被误判成风控。
+
+    只做三类替换，都是 JS 专有而 JSON 没有的值：
+      undefined → null
+      NaN / Infinity / -Infinity → null
+
+    替换按字符串感知处理：跳过被引号包裹的部分，
+    避免正文里恰好出现 "undefined" 这个词时被误改。
+    """
+    if not text or ("undefined" not in text and "NaN" not in text
+                    and "Infinity" not in text):
+        return text
+
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    quote = ""       # 当前所处的引号
+    while i < n:
+        ch = text[i]
+
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+
+        if ch in ('"', "'"):
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+
+        matched = False
+        for token, repl in (
+            ("-Infinity", "null"),
+            ("Infinity", "null"),
+            ("undefined", "null"),
+            ("NaN", "null"),
+        ):
+            if text.startswith(token, i):
+                # 确认是独立词：前一个字符不能是标识符的一部分
+                prev = out[-1] if out else ""
+                if prev and (prev.isalnum() or prev in "_$"):
+                    continue
+                # 后一个字符同理
+                nxt = text[i + len(token)] if i + len(token) < n else ""
+                if nxt and (nxt.isalnum() or nxt in "_$"):
+                    continue
+                out.append(repl)
+                i += len(token)
+                matched = True
+                break
+        if matched:
+            continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
 def _extract_state(html: str) -> dict[str, Any] | None:
     """从页面里取出 __INITIAL_STATE__。
 
     结束位置不固定（后面可能还有别的脚本），用「从右往左找最大可解析前缀」定位。
+
+    解析前先做 JS→JSON 的值替换，否则带登录态时会因为
+    状态里出现 `undefined` 而整页解析失败。
     """
     key = "window.__INITIAL_STATE__"
     start = html.find(key)
@@ -382,7 +501,7 @@ def _extract_state(html: str) -> dict[str, Any] | None:
     brace = html.find("{", start)
     if brace < 0:
         return None
-    blob = html[brace:]
+    blob = _js_literal_to_json(html[brace:])
     # 限制回溯步数，避免页面异常时长时间空转
     longest = min(len(blob), 3_000_000)
     tried = 0
@@ -579,8 +698,19 @@ def parse_rank_page(html: str) -> tuple[list[dict[str, Any]], int]:
         items.append({
             "book_id": str(b.get("bookId") or ""),
             "title_raw": raw_title,                  # 原始（可能带混淆）
-            "title_decoded": decoded.text,           # 尝试还原（可能不准）
-            "title": "",                             # 以详情页为准，此处留空
+            "title_decoded": decoded.text,           # 还原结果
+            # 默认用还原结果，而不是留空。
+            #
+            # 详情页的书名是干净的，所以调用方若做详情补取会用干净值覆盖这里。
+            # 但补取是可选的（enrich=false）—— 留空会让调用方拿到一批
+            # 无名书目，界面只能显示空白，比显示一个可能有个别错字的书名更糟。
+            # 需要区分时看 title_may_be_garbled。
+            "title": decoded.text or raw_title,
+            # 还原后仍含私用区字符，说明这个书名没能完全还原
+            "title_may_be_garbled": (
+                decoded.unresolved > 0
+                or any(0xE000 <= ord(c) <= 0xF8FF for c in (decoded.text or ""))
+            ),
             "author": str(b.get("author") or ""),
             "cover_url": str(b.get("thumbUri") or ""),
             # 榜单里 readCount 与 read_count 会并存且不一定一致，
@@ -1197,4 +1327,5 @@ __all__ = [
     "load_login_cookie",
     "save_login_cookie",
     "cookie_status",
+    "normalize_cookie",
 ]

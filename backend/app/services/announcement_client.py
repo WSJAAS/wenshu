@@ -27,6 +27,11 @@ class AnnouncementClient:
         json: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """发送请求到云端公告服务"""
+        if not self.base_url:
+            raise AnnouncementClientError(
+                "未配置云端公告地址（WORKSHOP_CLOUD_URL 为空），该功能在当前部署下不可用"
+            )
+
         headers = {
             "X-Instance-ID": INSTANCE_ID,
             "Content-Type": "application/json",

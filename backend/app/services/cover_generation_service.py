@@ -226,10 +226,14 @@ class CoverGenerationService:
         if provider_value == "grok":
             return GrokCoverProvider(api_key=api_key, base_url=normalized_base_url)
         if provider_value == "mumu":
+            # 兼容通道：按地址形态自动选择 Gemini / OpenAI 兼容实现。
+            # 二次开发版本不再内置任何上游默认地址，必须由用户显式配置。
+            if not normalized_base_url:
+                raise HTTPException(status_code=400, detail="请先填写封面图片接口地址")
             if normalized_base_url.endswith("/v1beta"):
                 return GeminiCoverProvider(api_key=api_key, base_url=normalized_base_url)
-            return GrokCoverProvider(api_key=api_key, base_url=normalized_base_url or "https://zhongzhuan.mumuverse.space/v1")
-        raise HTTPException(status_code=400, detail="当前版本仅支持 Gemini、Grok 或 MuMuのAPI 作为封面图片 Provider")
+            return GrokCoverProvider(api_key=api_key, base_url=normalized_base_url)
+        raise HTTPException(status_code=400, detail="当前版本仅支持 Gemini、Grok 或自定义兼容渠道作为封面图片 Provider")
 
     def _save_cover_file(
         self,

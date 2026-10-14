@@ -159,7 +159,110 @@
 
 ---
 
-## 五、恢复办法
+## 六、界面去推广与自有版本号
+
+修改日期：**2026-10-14**
+
+本工程为二次开发版本，使用自有版本号 **2.0.0**，与上游版本序列相互独立。
+
+### 6.1 移除右上角推广位
+
+**改动文件**：
+
+- `frontend/src/pages/ProjectList.tsx`
+
+**改动**：移除头部右上角的公告铃铛入口（桌面端与移动端各一处），
+以及拉取上游云端公告的 `useAnnouncements` 调用与 `AnnouncementTimelineModal` 渲染。
+
+**原因**：该公告内容由上游托管服务器下发，属于外部推广位，
+在二次开发版本中不保留。
+
+### 6.2 移除中间赞助位
+
+**改动文件**：
+
+- `frontend/src/components/AppFooter.tsx`
+- `frontend/src/pages/Sponsor.tsx`（删除）
+- `frontend/src/pages/ProjectDetail.tsx`
+- `frontend/src/App.tsx`
+
+**改动**：
+
+1. 页脚不再渲染「赞助」「赞助支持」按钮与其跳转地址。
+2. 删除赞助页 `Sponsor.tsx`，移除 `/project/:id/sponsor` 路由。
+3. 项目详情侧边菜单移除「赞助支持」项，
+   默认落点由 `sponsor` 改为 `world-setting`。
+
+### 6.3 移除旧版本号与上游外链
+
+**改动文件**：
+
+- `frontend/src/components/AppFooter.tsx`
+- `frontend/src/services/versionService.ts`
+- `frontend/src/config/version.ts`
+
+**改动**：
+
+1. 页脚不再显示上游版本号与 `LinuxDO 社区` 外链。
+2. `versionService` 不再联网请求上游 GitHub release badge，
+   改为直接回显自有版本号，避免把上游版本误报为「新版本」。
+3. 保留上游项目名与仓库地址，其性质为许可证要求的署名，非推广入口。
+
+### 6.4 二次开发声明与自有版本号
+
+**改动文件**：
+
+- `frontend/src/config/version.ts`
+- `frontend/package.json`
+- `backend/app/config.py`
+- `backend/app/__init__.py`
+
+**改动**：
+
+1. 新增 `SECONDARY_DEV_VERSION = '2.0.0'` 与 `secondaryDevNotice` 字段。
+2. 页脚显式标注「本项目为二次开发版本」及上游来源。
+3. `package.json` 版本号改为 `2.0.0`（构建时注入前端）。
+4. 后端 `app_name` 改为 `Wenshu`，`app_version` 改为 `2.0.0`。
+
+### 6.5 移除其他外部推广入口
+
+**改动文件**：
+
+- `frontend/src/pages/Settings.tsx`
+- `frontend/src/services/changelogService.ts`
+- `frontend/src/pages/Login.tsx`、`frontend/src/pages/AuthCallback.tsx`
+- `frontend/src/components/SpringFestival.tsx`（删除）及 `SpringFestival.css`（删除）
+
+**改动**：
+
+1. 设置页三处「免费注册」跳转按钮移除，
+   相关渠道选项改为「自定义渠道（OpenAI 兼容）」，由用户自行填写地址与凭据。
+2. 更新日志数据源由上游仓库改为本工程仓库。
+3. 登录页与 OAuth 回调页的欢迎公告弹窗移除。
+4. 移除 `App.tsx` 中挂载的春节装饰组件。
+
+### 6.6 后端默认不再连接上游托管服务
+
+**改动文件**：
+
+- `backend/app/config.py`
+- `backend/app/services/announcement_client.py`
+- `backend/app/services/workshop_client.py`
+- `backend/app/services/cover_generation_service.py`
+
+**改动**：
+
+1. `WORKSHOP_CLOUD_URL` 默认值由上游托管地址改为空字符串。
+2. 两个云端客户端在地址为空时直接抛出明确错误，
+   不再构造指向上游的请求。
+3. 封面图生成不再内置上游默认地址，必须由用户显式配置。
+
+**影响**：提示词工坊的云端共享功能默认关闭。
+如需使用，在 `backend/.env` 中设置 `WORKSHOP_CLOUD_URL` 指向自建服务端。
+
+---
+
+## 七、恢复办法
 
 本工程保留了对上游的引用方式，如需比对原始实现，
 可在 `docs/上游对齐.md` 中查到各文件的来源与差异摘要。

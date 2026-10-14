@@ -68,6 +68,11 @@ def _ensure_source_task_columns(sync_conn) -> None:
     existing = {c["name"] for c in inspector.get_columns("source_tasks")}
     wanted = {
         "chapters_digest": "VARCHAR(64) DEFAULT ''",
+        "import_task_id": "VARCHAR(36) DEFAULT ''",
+        "import_status": "VARCHAR(20) DEFAULT ''",
+        "import_message": "VARCHAR(500) DEFAULT ''",
+        "imported_at": "DATETIME",
+        "auto_import": "BOOLEAN DEFAULT 1",
     }
     for col, ddl in wanted.items():
         if col not in existing:

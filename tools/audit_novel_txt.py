@@ -149,23 +149,26 @@ ok("无异常控制字符", ctrl == 0, f"{ctrl} 个")
 
 print()
 print("=" * 94)
-print("【5】噪音残留（导航/广告/网址）")
+print("【5】噪音残留（排除文件头有意保留的溯源行）")
 print("=" * 94)
+# 文件头的三行是刻意写的：书名/作者、来源 URL。检查正文时先摘掉。
+body_only = re.sub(r"^《[^\n]*\n\n来源：[^\n]*\n\n", "", text, count=1, flags=re.M)
+
 NOISE_PATS = {
-    "站名/网址": r"努努书坊|kanunu|www\.[a-z0-9\-]+\.(?:com|net|org|cc)",
-    "导航": r"上一章|下一章|返回目录|加入书签|投推荐票|手机阅读|回顶部|意见反馈",
-    "广告": r"请记住本站|最快更新|全文阅读|无弹窗|赞助",
+    "站名/网址": r"努努书坊|kanunu|ptwxz|www\.[a-z0-9\-]+\.(?:com|net|org|cc)",
+    "导航": r"上一章|下一章|返回目录|返回书页|加入书签|投推荐票|手机阅读|回顶部|意见反馈",
+    "广告": r"请记住本站|最快更新|全文阅读|无弹窗|赞助|章节错误|点此举报",
     "页脚": r"版权所有|Copyright|All Rights Reserved|本站内容来源于网络|版权归属作家",
 }
 for name, pat in NOISE_PATS.items():
-    hits = re.findall(pat, text, re.I)
+    hits = re.findall(pat, body_only, re.I)
     cnt = len(hits)
     sample = list(dict.fromkeys(hits))[:3]
-    # 文件头里有「来源：<URL>」是有意保留的溯源信息，单独说明
-    ok(f"无「{name}」残留", cnt == 0, f"{cnt} 处 {sample}" if cnt else "")
+    ok(f"正文无「{name}」残留", cnt == 0, f"{cnt} 处 {sample}" if cnt else "")
 
 prov = re.search(r"^来源：(\S+)", text, re.M)
-print(f"  （文件头的「来源：{prov.group(1) if prov else '—'}」是刻意保留的溯源信息）")
+ok("文件头保留溯源信息", bool(prov),
+   f"来源：{prov.group(1) if prov else '缺失'}（有意保留，便于回溯核对）")
 
 print()
 print("=" * 94)
