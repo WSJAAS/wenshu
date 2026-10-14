@@ -32,6 +32,7 @@ import type {
   PolishBatchResponse,
   AcceptResponse,
   AcceptRecord,
+  ApiConfigStatus,
   SourceStatus,
   SourceLoginState,
   SourceRankResponse,
@@ -245,6 +246,10 @@ export const userApi = {
 
 export const settingsApi = {
   getSettings: () => api.get<unknown, Settings>('/settings'),
+
+  /** AI 配置状态。供进入时判断是否需要弹配置引导。 */
+  getApiConfigStatus: () =>
+    api.get<unknown, ApiConfigStatus>('/settings/api-config-status'),
 
   saveSettings: (data: SettingsUpdate) =>
     api.post<unknown, Settings>('/settings', data),

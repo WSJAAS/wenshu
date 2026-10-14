@@ -109,6 +109,23 @@ export interface SettingsUpdate {
   preferences?: string;
 }
 
+/**
+ * AI 配置状态。
+ *
+ * 只看「配没配」，不代表 key 真的有效 —— 那需要发一次真实请求验证。
+ * 占位值（如 sk-SET_ME）会被后端识别为未配置。
+ */
+export interface ApiConfigStatus {
+  configured: boolean;
+  provider: string;
+  model: string;
+  base_url: string;
+  /** 打码后的 key，仅用于展示 */
+  key_preview: string;
+  /** 未配置的原因，已配置时为空串 */
+  reason: string;
+}
+
 // API预设相关类型定义
 export interface APIKeyPresetConfig {
   api_provider: string;

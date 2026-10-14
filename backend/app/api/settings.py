@@ -371,6 +371,62 @@ async def get_settings(
     return settings
 
 
+@router.get("/api-config-status")
+async def get_api_config_status(
+    user: User = Depends(require_login),
+    db: AsyncSession = Depends(get_db),
+):
+    """AI 配置是否可用 —— 供前端决定要不要弹配置引导。
+
+    只看「配没配」，不校验 key 是否真的有效：那需要发一次真实请求，
+    代价高且会被网络影响。真正的有效性由 /settings/test 验证。
+
+    占位值（如 sk-SET_ME）视为未配置。这类值的历史来源是从 .env
+    播种进数据库的默认值，若不识别，界面会显示「已配置」而实际每次都
+    401，用户无从察觉。
+    """
+    result = await db.execute(
+        select(Settings).where(Settings.user_id == user.user_id)
+    )
+    settings = result.scalar_one_or_none()
+
+    raw_key = (settings.api_key if settings else None) or ""
+    provider = (settings.api_provider if settings else None) or "openai"
+    model = (settings.llm_model if settings else None) or ""
+    base_url = (settings.api_base_url if settings else None) or ""
+
+    # 占位值识别。这些是模板里留下的、不构成有效凭据的字符串。
+    PLACEHOLDERS = (
+        "sk-SET_ME", "SET_ME", "your-api-key", "your_api_key",
+        "sk-xxx", "changeme", "placeholder", "todo", "填入",
+    )
+    key = raw_key.strip()
+    is_placeholder = (not key) or any(
+        p.lower() in key.lower() for p in PLACEHOLDERS
+    )
+    # 明显的长度异常也算无效（真实 key 不会只有几个字符）
+    if not is_placeholder and len(key) < 12:
+        is_placeholder = True
+
+    return {
+        "configured": not is_placeholder,
+        "provider": provider,
+        "model": model,
+        "base_url": base_url,
+        # 只回传打码后的 key，避免把密钥送到前端
+        "key_preview": (
+            "" if not key
+            else (key[:6] + "…" + key[-4:]) if len(key) > 14
+            else "已设置"
+        ),
+        "reason": (
+            "尚未填写 API Key" if not key
+            else "仍是默认占位值，需要替换为真实 Key" if is_placeholder
+            else ""
+        ),
+    }
+
+
 @router.post("/cover/test")
 async def test_cover_settings(
     data: CoverSettingsTestRequest,

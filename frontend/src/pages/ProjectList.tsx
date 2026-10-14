@@ -18,6 +18,7 @@ import MCPPluginsPage from './MCPPlugins';
 import PromptTemplates from './PromptTemplates';
 import BookImport from './BookImport';
 import Source from './Source';
+import ApiConfigGate from '../components/ApiConfigGate';
 import BookshelfPage from './BookshelfPage';
 import { getStoredSidebarCollapsed, setStoredSidebarCollapsed } from '../utils/sidebarState';
 import AnnouncementTimelineModal from '../components/AnnouncementTimelineModal';
@@ -520,6 +521,9 @@ export default function ProjectList() {
       overflow: 'hidden'
     }}>
       {contextHolder}
+
+      {/* AI 配置引导：未配置时进入弹一次，可跳过 */}
+      <ApiConfigGate />
 
       {!isMobile && (
         <div
