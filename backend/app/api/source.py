@@ -40,6 +40,7 @@ from app.services.fanqie_source import (
     FanqieClient, FanqieError, build_missing_report, merge_results,
     results_to_txt,
     cookie_status, save_login_cookie,
+    build_chapter_content,
 )
 
 router = APIRouter(prefix="/source", tags=["书源"])
@@ -1022,6 +1023,12 @@ class HandoverRequest(BaseModel):
     create_task: bool = Field(default=True, description="是否立即抓取")
     chapter_count: int = Field(default=30, ge=1, le=3000, description="create_task 时抓多少章")
     auto_import: bool = Field(default=True, description="抓完后是否自动交给拆书模块")
+    # 取文方式：
+    #   server  —— 后端直连抓（未登录只能拿到前 10 章全文）
+    #   browser —— 只建任务，正文由浏览器站内取回后回传
+    #              （浏览器自带 HttpOnly 登录态，可拿全文）
+    # 默认 server，保持既有行为不变。
+    fetch_mode: str = Field(default="server", description="server=后端直连 / browser=浏览器代抓")
 
 
 @router.post("/handover", summary="接收浏览器交来的书（用户脚本调用）")
@@ -1128,14 +1135,31 @@ async def handover_from_browser(
         await db.commit()
         await db.refresh(task)
 
+        result["task_id"] = task.id
+        result["auto_import"] = payload.auto_import
+
+        if payload.fetch_mode == "browser":
+            # 浏览器代抓：不起后端直连抓取，正文由脚本回传。
+            # 同时起的坏处是同一批章被抓两遍（白耗配额、更易触发风控），
+            # 且直连拿到的试读结果会先落库、再被浏览器结果覆盖。
+            task.status = "running"
+            task.message = f"等待浏览器代抓 {len(picked)} 章"
+            await db.commit()
+            result["fetch_mode"] = "browser"
+            result["message"] = (
+                (result["message"] + " " if result["message"] else "")
+                + f"任务已建立，等待浏览器取回 {len(picked)} 章正文。"
+                + " 浏览器会带上你的登录态，因此可以取到全文。"
+            )
+            return result
+
         asyncio.create_task(_run_task(
             task.id,
             selected_ids=[c.item_id for c in picked],
             interval=1.2,
             max_chapters=None,
         ))
-        result["task_id"] = task.id
-        result["auto_import"] = payload.auto_import
+        result["fetch_mode"] = "server"
         result["message"] = (
             (result["message"] + " " if result["message"] else "")
             + f"已开始抓取前 {len(picked)} 章。"
@@ -1168,6 +1192,194 @@ async def handover_from_browser(
             )
 
     return result
+
+
+# ============================================================
+#  浏览器代抓通道
+#
+#  背景：番茄的登录凭据 `sessionid` 是 HttpOnly Cookie，
+#  页内脚本读不到（document.cookie 拿不到），后端也拿不到。
+#  而**浏览器自己**在 fanqienovel.com 源内发请求时，会由浏览器
+#  自动带上这些 HttpOnly Cookie —— 所以不必把凭据交出来。
+#
+#  做法：
+#    1. 后端先把要抓的章（item_id 列表）下发
+#    2. 用户在番茄页面运行的脚本，对每个 item_id 发同源请求
+#       fetch('/reader/' + itemId)，浏览器自动附登录态
+#    3. 脚本把原始 HTML 回传，后端用与直连抓取**同一套**解码
+#       与截断判定逻辑落库
+#
+#  这样绕开了两个死结：HttpOnly 读不到、风控签名算不出。
+#  浏览器发的是正常页面请求，不涉及逆向签名。
+# ============================================================
+class BrowserChapterItem(BaseModel):
+    item_id: str
+    html: str
+
+
+class BrowserChaptersRequest(BaseModel):
+    task_id: str
+    chapters: list[BrowserChapterItem] = Field(default_factory=list)
+
+
+@router.post("/browser-chapters", summary="接收浏览器代抓的正文（用户脚本调用）")
+async def submit_browser_chapters(
+    payload: BrowserChaptersRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """把浏览器抓到的原始 HTML 解码后并入任务结果。
+
+    为什么由浏览器抓：登录凭据是 HttpOnly Cookie，脚本读不到、
+    后端也拿不到；但浏览器在同源页面里发请求时会自动携带，
+    因此让浏览器去抓是最省事且不碰凭据的做法。
+
+    解码与截断判定复用 `build_chapter_content`，
+    与直连抓取走同一套逻辑，两条路径的状态定义保持一致。
+
+    统计范围以**本任务选定的章**为准（`_resolve_targets`），
+    而不是整本目录 —— 否则「只选 12 章」的任务会被
+    未选中的章节拉低分母，与其它接口的口径不一致。
+    """
+    _require_enabled()
+    t = await db.get(SourceTask, payload.task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 只接受本任务范围内的章：避免任务之间串内容，也保证统计口径一致
+    targets = _resolve_targets(t)
+    ref_by_id = {c.item_id: c for c in targets}
+
+    already = _load_chapters(t)
+    fresh: dict[str, ChapterContent] = {}
+    skipped: list[str] = []
+
+    for item in payload.chapters:
+        ref = ref_by_id.get(item.item_id)
+        if ref is None:
+            skipped.append(item.item_id)
+            continue
+        fresh[item.item_id] = build_chapter_content(ref, item.html)
+
+    if not fresh:
+        raise HTTPException(
+            status_code=400,
+            detail="没有可用的章节内容（item_id 是否属于该任务选定的范围？）",
+        )
+
+    merged = merge_results(already, list(fresh.values()))
+    _save_chapters(t, merged)
+
+    # 重算统计（口径：本任务选定的章）
+    want = set(ref_by_id.keys())
+    ok = sum(1 for c in merged.values()
+             if c.status == "ok" and c.item_id in want)
+    preview = sum(1 for c in merged.values()
+                  if c.status == "preview" and c.item_id in want)
+    t.done_count = sum(1 for c in merged.values() if c.item_id in want)
+    t.ok_count = ok
+    t.failed_count = max(0, len(want) - ok)
+
+    total = len(want)
+    if t.status not in ("cancelled",):
+        # 还有没抓完的就保持 running，抓完标 completed
+        if t.done_count >= total:
+            t.status = "completed"
+            t.message = (
+                f"完成：完整 {ok}/{total} 章"
+                + (f"，另 {preview} 章为试读片段" if preview else "")
+                + "（浏览器代抓）"
+            )
+        else:
+            t.status = "running"
+            t.message = f"浏览器代抓进行中：已收 {t.done_count}/{total} 章"
+
+    await db.commit()
+
+    # 抓完就交给拆书 —— 与后端直连路径行为一致。
+    # 两条入口的最终动作必须相同，否则「同样点一下」会得到不同结果。
+    if (
+        t.status == "completed"
+        and ok > 0
+        and bool(getattr(t, "auto_import", True))
+        and t.import_status != "handed"
+    ):
+        try:
+            res = await _hand_to_book_import(t, t.user_id)
+            t.import_task_id = res["import_task_id"]
+            t.import_status = "handed"
+            t.import_message = (
+                f"浏览器代抓完成后自动交接：完整 {res['handed_chapters']} 章"
+                + (f"，另 {res['preview_chapters']} 章为试读片段"
+                   if res["preview_chapters"] else "")
+                + f"，共 {res['txt_chars']} 字"
+            )
+            t.imported_at = datetime.utcnow()
+            logger.info("浏览器代抓任务 %s 已自动交接拆书：%s",
+                        t.id, res["import_task_id"])
+        except Exception as e:
+            t.import_status = "failed"
+            t.import_message = f"自动交接失败：{type(e).__name__}: {e}"[:500]
+            logger.warning("浏览器代抓任务 %s 自动交接失败：%s", t.id, e)
+        await db.commit()
+
+    return {
+        "ok": True,
+        "task_id": t.id,
+        "accepted": len(fresh),
+        "accepted_ok": sum(1 for c in fresh.values() if c.status == "ok"),
+        "accepted_preview": sum(1 for c in fresh.values() if c.status == "preview"),
+        "skipped": skipped[:20],
+        "done": t.done_count,
+        "total": t.total_chapters,
+        "ok_count": t.ok_count,
+        "status": t.status,
+        "message": t.message,
+    }
+
+
+@router.get("/tasks/{task_id}/browser-plan", summary="浏览器代抓的取文清单")
+async def browser_fetch_plan(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    only_missing: bool = Query(default=True, description="只返回尚未拿到全文的章"),
+):
+    """给浏览器脚本的取文清单。
+
+    只给 item_id 与章节标题，**不含任何凭据**。
+    脚本据此在番茄页面内逐章发同源请求。
+    """
+    _require_enabled()
+    t = await db.get(SourceTask, task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    targets = _resolve_targets(t)
+    results = _load_chapters(t)
+
+    items = []
+    for ref in targets:
+        c = results.get(ref.item_id)
+        if only_missing and c is not None and c.status == "ok":
+            continue
+        items.append({
+            "order": ref.order,
+            "item_id": ref.item_id,
+            "title": ref.title,
+            "volume": ref.volume,
+            "current_status": c.status if c else "not_fetched",
+        })
+
+    return {
+        "task_id": t.id,
+        "book_title": t.book_title,
+        "book_id": t.book_id,
+        "total": t.total_chapters,
+        "done": t.done_count,
+        "pending": len(items),
+        "items": items,
+    }
 
 
 @router.get("/handover/summary", summary="最近接收的浏览器交接")
@@ -1229,14 +1441,21 @@ async def handover_guide():
         "steps": [
             "安装浏览器扩展 Tampermonkey（油猴）",
             "点击下方按钮安装「文枢 · 番茄联动」脚本",
-            "在番茄小说登录你的账号",
-            "打开任意书籍页，点右下角「交给文枢」",
+            "在番茄小说登录你的账号（不登录只能取到前 10 章）",
+            "打开任意书籍页，点右下角「交给文枢」，等取文跑完",
         ],
         "notes": [
-            "脚本只把书籍标识和 Cookie 发到本机 127.0.0.1，不经过任何第三方。",
-            "Cookie 只保存在本机数据目录，不入库、不进 git。",
-            "登录后第 11 章起才能取到全文；未登录只能取到约 200 字的试读片段。",
+            "正文由浏览器在番茄站内取回，登录态始终留在浏览器里，不需要交出 Cookie。",
+            "之所以这样设计：番茄的登录凭据 sessionid 是 HttpOnly Cookie，"
+            "页内脚本和本机服务都读不到，但浏览器发站内请求时会自动带上。",
+            "取文间隔默认 1.2 秒，可在脚本菜单里调整；调太快容易触发风控。",
+            "脚本只把书籍标识和正文发到本机 127.0.0.1，不经过任何第三方。",
         ],
         "login_ready": bool(ck.get("has_sessionid")),
         "login_note": ck.get("note", ""),
+        # 说明两条取文路径的差别，供界面提示
+        "fetch_modes": {
+            "browser": "浏览器站内取文：自带登录态，可拿全文（推荐）",
+            "server": "本机直连抓取：未登录时仅前 10 章可用，其余为试读片段",
+        },
     }

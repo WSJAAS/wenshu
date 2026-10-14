@@ -873,27 +873,9 @@ class FanqieClient:
     def fetch_chapter(self, ref: ChapterRef) -> ChapterContent:
         """取单章正文并解码。
 
-        逐章状态判定：
-          - ok           拿到全文（长度与平台申报相符，且无残留私用区）
-          - preview      只拿到试读预览（服务端截断，见下）
-          - locked       章节被锁定或需付费，正文为空
-          - unavailable  正文为空或页面结构异常
-          - garbled      解码后仍有私用区字符（码表可能过期）
-          - failed       网络或其它错误
-
-        ## 为什么必须单独有 preview 这一档
-
-        未登录抓取时，`isChapterLock=true` 的章返回的 content
-        **恒为 200 个字符**（HTML 长度正好 200），是截断预览；
-        页面里同时写着「会员登录后，可在网页畅读全文」。
-
-        早期实现只判断「解码后有没有残留」，于是这批预览章
-        全部落进 ok 分支。实测《惹金枝》550 章「550/550 成功」，
-        导出后却只有 10.9 万字，而平台申报 116 万字 ——
-        正文静悄悄少了 91%，且缺章清单是空的。
-
-        这与「静默填空」是同一类错误：状态必须如实描述拿到的东西。
-        所以这里以「服务端标记」+「实际长度 vs 申报字数」双重判定。
+        网络层只负责把 HTML 拿回来，解析与判定统一走
+        `build_chapter_content` —— 浏览器代抓通道要用同一套判定，
+        两条路径的状态定义必须一致。
         """
         result = ChapterContent(
             item_id=ref.item_id,
@@ -904,7 +886,6 @@ class FanqieClient:
 
         try:
             html = self._get(f"{BASE}/reader/{ref.item_id}")
-            title, content_html, meta = parse_reader_page(html)
         except BlockedError:
             # 风控要向上抛，让批次停止
             raise
@@ -925,53 +906,105 @@ class FanqieClient:
             result.error = f"{type(e).__name__}: {e}"
             return result
 
-        result.title = title or ref.title
-        result.pua_before = count_pua(content_html)
+        return build_chapter_content(ref, html, fallback=result)
 
-        decoded = extract_body(content_html)
-        result.text = decoded.text
-        result.pua_after = decoded.unresolved
-        result.chars = len(decoded.text)
 
-        # 服务端元数据：判定截断的依据
-        result.is_locked = bool(meta.get("isChapterLock"))
-        result.claimed_words = _to_int(meta.get("chapterWordNumber"))
+def build_chapter_content(
+    ref: ChapterRef,
+    html: str,
+    fallback: ChapterContent | None = None,
+) -> ChapterContent:
+    """从阅读页 HTML 构造章节结果（解析 + 解码 + 截断判定）。
 
-        if decoded.unresolved > 0:
-            # 有残留说明表可能过期 —— 标为乱码，不进入后续分析
-            result.status = "garbled"
-            result.error = (
-                f"解码后仍有 {decoded.unresolved} 个私用区字符，"
-                "码表可能已过期，请核对字体是否更换"
-            )
-            return result
+    这是**唯一**的正文判定实现。两条取文路径都走它：
 
-        if not decoded.text.strip():
-            result.status = "unavailable"
-            result.error = "解码后正文为空"
-            return result
+      - `FanqieClient.fetch_chapter`：本机直连抓取（未登录只能拿试读）
+      - `POST /api/source/browser-chapters`：浏览器代抓回传
+        （浏览器自带 HttpOnly 登录态，可拿到全文）
 
-        # ---------- 截断判定 ----------
-        # 判据取「服务端标记」与「长度显著短于申报」的并集：
-        #   - isChapterLock 是服务端自己的说法，最可靠；
-        #   - 长度判据兜住 isChapterLock 未置位但内容仍被裁剪的情况。
-        # 阈值取 0.6：正常章偶有几百字浮动，但不会只剩十分之一。
-        short = (
-            result.claimed_words > 0
-            and result.chars < result.claimed_words * TRUNCATION_RATIO
-        )
-        if result.is_locked or short:
-            result.status = "preview"
-            result.error = (
-                f"服务端只返回试读预览（取得 {result.chars} 字，"
-                f"平台申报 {result.claimed_words} 字）。"
-                "未登录时锁定章恒定截断为 200 字符，"
-                "需登录态才能取得该章全文。"
-            )
-            return result
+    抽出来是为了避免两份判定逻辑各自演化。上一版的教训是：
+    「服务端截断成 200 字符预览」曾被记成 ok，导致 550 章的书
+    导出后正文少了 91% 却报「零失败」。
 
-        result.status = "ok"
+    ## 逐章状态
+      - ok           拿到全文（长度与平台申报相符，且无残留私用区）
+      - preview      只拿到试读预览（服务端截断）
+      - locked       章节被锁定或需付费，正文为空
+      - unavailable  正文为空或页面结构异常
+      - garbled      解码后仍有私用区字符（码表可能过期）
+
+    ## 为什么必须单独有 preview 这一档
+
+    未登录抓取时，`isChapterLock=true` 的章返回的 content
+    **恒为 200 个字符**（HTML 长度正好 200），是截断预览；
+    页面里同时写着「会员登录后，可在网页畅读全文」。
+
+    判据取「服务端标记」与「长度显著短于申报」的并集：
+      - isChapterLock 是服务端自己的说法，最可靠；
+      - 长度判据兜住 isChapterLock 未置位但内容仍被裁剪的情况。
+    阈值取 0.6：正常章偶有几百字浮动，但不会只剩十分之一。
+    """
+    result = fallback or ChapterContent(
+        item_id=ref.item_id,
+        title=ref.title,
+        volume=ref.volume,
+        order=ref.order,
+    )
+
+    try:
+        title, content_html, meta = parse_reader_page(html)
+    except FanqieError as e:
+        msg = str(e)
+        result.status = "locked" if "锁定" in msg else "unavailable"
+        result.error = msg
         return result
+    except Exception as e:
+        result.status = "unavailable"
+        result.error = f"{type(e).__name__}: {e}"
+        return result
+
+    result.title = title or ref.title
+    result.pua_before = count_pua(content_html)
+
+    decoded = extract_body(content_html)
+    result.text = decoded.text
+    result.pua_after = decoded.unresolved
+    result.chars = len(decoded.text)
+
+    # 服务端元数据：判定截断的依据
+    result.is_locked = bool(meta.get("isChapterLock"))
+    result.claimed_words = _to_int(meta.get("chapterWordNumber"))
+
+    if decoded.unresolved > 0:
+        # 有残留说明表可能过期 —— 标为乱码，不进入后续分析
+        result.status = "garbled"
+        result.error = (
+            f"解码后仍有 {decoded.unresolved} 个私用区字符，"
+            "码表可能已过期，请核对字体是否更换"
+        )
+        return result
+
+    if not decoded.text.strip():
+        result.status = "unavailable"
+        result.error = "解码后正文为空"
+        return result
+
+    short = (
+        result.claimed_words > 0
+        and result.chars < result.claimed_words * TRUNCATION_RATIO
+    )
+    if result.is_locked or short:
+        result.status = "preview"
+        result.error = (
+            f"服务端只返回试读预览（取得 {result.chars} 字，"
+            f"平台申报 {result.claimed_words} 字）。"
+            "未登录时锁定章恒定截断为 200 字符，"
+            "需登录态才能取得该章全文。"
+        )
+        return result
+
+    result.status = "ok"
+    return result
 
 
 # ============================================================
@@ -1300,8 +1333,7 @@ def results_to_txt(
     return body
 
 
-__all__ = [
-    "BASE",
+__all__ = [    "BASE",
     "FREE_CHAPTER_COUNT",
     "FanqieError",
     "BlockedError",
@@ -1328,4 +1360,6 @@ __all__ = [
     "save_login_cookie",
     "cookie_status",
     "normalize_cookie",
+    "build_chapter_content",
+    "parse_reader_page",
 ]
