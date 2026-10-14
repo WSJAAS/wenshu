@@ -79,9 +79,9 @@ config_logger.debug(f"数据库URL: {DATABASE_URL}")
 class Settings(BaseSettings):
     """应用配置"""
     
-    # 应用配置
-    app_name: str = "MuMuAINovel"
-    app_version: str = "1.5.6"
+    # 应用配置（二次开发版本：自有名称与版本号）
+    app_name: str = "Wenshu"
+    app_version: str = "2.0.0"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     debug: bool = False
@@ -192,7 +192,9 @@ class Settings(BaseSettings):
     
     # 提示词工坊配置
     WORKSHOP_MODE: str = "client"  # client: 本地部署实例, server: 云端中央服务器
-    WORKSHOP_CLOUD_URL: str = "https://mumuverse.space:1566"  # 云端服务地址
+    # 二次开发版本默认不连接任何上游托管服务。留空即关闭云端同步；
+    # 如需自建中央服务器，在 .env 里填自己的地址。
+    WORKSHOP_CLOUD_URL: str = ""
     WORKSHOP_API_TIMEOUT: int = 30  # 云端API请求超时时间（秒）
 
     # ============================================================

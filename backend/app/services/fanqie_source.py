@@ -58,6 +58,16 @@ DEFAULT_MAX_RETRIES = 3             # 单请求最多重试
 DEFAULT_TIMEOUT = 30                # 单请求超时
 DEFAULT_BACKOFF_BASE = 2.0          # 退避基数（秒）
 
+# 未登录时平台免费开放前若干章的全文，在此之后只给试读片段。
+#
+# 实测《惹金枝》：第 1~10 章为全文（约 2100 字），第 11 章起 content
+# 恒为约 200 字符，且 isChapterLock 恰好覆盖「总章数 − 10」章。
+# 三本书（550 / 337 / 1288 章）的差值都是 10，故取 10。
+#
+# 这个值只用于**预估**还剩多少章拿不到全文，以及给用户的提示文案；
+# 真正的可读性判定仍以每章的 is_locked / 长度比为准，不依赖这个常量。
+FREE_CHAPTER_COUNT = 10
+
 # 截断判定阈值：实际字数低于「平台申报字数 × 该比例」即视为只拿到预览。
 #
 # 取 0.6 而不是更贴近 1.0 的值，是因为正文长度本身有浮动
@@ -699,6 +709,36 @@ class FanqieClient:
         html = self._get(f"{BASE}/page/{book_id}")
         return parse_book_page(html, book_id)
 
+    # ---------- 反查 ----------
+    def resolve_book_by_item(self, item_id: str) -> str:
+        """从章节 ID 反查所属书籍 ID。
+
+        阅读页交接时浏览器只给得出 itemId（URL 里的那串数字），
+        需要换算成 bookId 才能取目录。
+
+        实测阅读页的 `reader.chapterData.bookId` 直接给出所属书，
+        不需要额外请求目录接口。取不到时返回空串。
+        """
+        if not item_id:
+            return ""
+        try:
+            html = self._get(f"{BASE}/reader/{item_id}")
+            state = _extract_state(html)
+        except FanqieError:
+            return ""
+
+        if not state:
+            return ""
+        reader = state.get("reader")
+        if not isinstance(reader, dict):
+            return ""
+        cd = reader.get("chapterData")
+        if not isinstance(cd, dict):
+            return ""
+
+        bid = cd.get("bookId")
+        return str(bid).strip() if bid else ""
+
     # ---------- 正文 ----------
     def fetch_chapter(self, ref: ChapterRef) -> ChapterContent:
         """取单章正文并解码。
@@ -1132,6 +1172,7 @@ def results_to_txt(
 
 __all__ = [
     "BASE",
+    "FREE_CHAPTER_COUNT",
     "FanqieError",
     "BlockedError",
     "NotFoundError",

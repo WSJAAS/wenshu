@@ -112,22 +112,56 @@ if task_id:
         check("接口返回 ai_degraded 字段", "ai_degraded" in final)
         check("接口返回 ai_fallback_reasons 字段", "ai_fallback_reasons" in final)
 
-        # 当前 AI 未配置（sk-SET_ME），必然降级
-        check("AI 未配置时 ai_degraded 为真", final.get("ai_degraded") is True,
-              f"ai_degraded={final.get('ai_degraded')}")
+        # 本脚本验证的是「降级信息是否可见」，不是「AI 必须失败」。
+        # 因此两种状态都要能正确表达：
+        #   - 配置了可用 Key → ai_used=True,   ai_degraded=False, 原因为空
+        #   - 未配置/不可用  → ai_used 可能为 False, ai_degraded=True, 原因非空
+        # 关键约束是二者自洽：降级了就必须有原因，没降级就不该有原因。
+        used = final.get("ai_used")
+        degraded = final.get("ai_degraded")
         reasons = final.get("ai_fallback_reasons") or []
-        check("降级原因非空且可读", len(reasons) > 0, f"{reasons}")
+
+        print()
+        print(f"  本次 AI 状态：ai_used={used}  ai_degraded={degraded}  "
+              f"reasons={reasons}")
+
+        # 先确认真实配置，避免把「Key 已填」误判成回归
+        st, body = call("GET", "/api/settings/api-config-status")
+        cfg = json.loads(body) if st == 200 else {}
+        ai_configured = bool(cfg.get("configured"))
+        print(f"  当前配置状态：configured={ai_configured}  "
+              f"provider={cfg.get('provider')}  model={cfg.get('model')}")
+
+        if ai_configured:
+            # 已配置：应表现为成功，无降级
+            check("已配置 Key 时 ai_used 为真", used is True,
+                  f"ai_used={used}")
+            check("已配置 Key 时未发生降级", degraded is False,
+                  f"ai_degraded={degraded}")
+            check("未降级时原因列表为空", len(reasons) == 0, f"{reasons}")
+        else:
+            # 未配置：应表现为降级，且原因可读
+            check("未配置 Key 时发生降级", degraded is True,
+                  f"ai_degraded={degraded}")
+            check("降级原因非空且可读", len(reasons) > 0, f"{reasons}")
+
+        # 无论哪种状态，自洽性都要成立 —— 这是本脚本真正要守的
+        check("自洽：降级必有原因", (not degraded) or len(reasons) > 0,
+              f"degraded={degraded} reasons={reasons}")
+        check("自洽：未降级不该有原因", degraded or len(reasons) == 0,
+              f"degraded={degraded} reasons={reasons}")
+        check("自洽：用过 AI 则不应整体降级", (not used) or (not degraded),
+              f"used={used} degraded={degraded}")
 
         msg = final.get("message") or ""
         print()
         print(f"  最终 message: {msg!r}")
-        if final.get("ai_degraded") and "AI" not in msg and "规则" not in msg:
+        if degraded and "AI" not in msg and "规则" not in msg:
             print("  ✓ 正是问题场景：message 已不含 AI 信息，")
             print("    但 ai_degraded 仍如实为真 —— 信息没有丢失")
-            check("降级信息不依赖 message", True)
         else:
-            print("  （本次 message 恰好保留了提示，仍验证字段存在）")
-            check("降级信息独立于 message", "ai_degraded" in final)
+            print("  （本次 message 状态与 ai_degraded 一致）")
+        check("降级信息独立于 message 字段存在", "ai_degraded" in final)
 
 print()
 print("=" * 74)

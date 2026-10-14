@@ -290,16 +290,15 @@ export default function SettingsPage() {
     });
   };
 
-  const mumuTextDefaultUrl = 'https://zhongzhuan.mumuverse.space/v1';
-  const mumuRegisterUrl = 'https://zhongzhuan.mumuverse.space/register?aff=gt7d';
+  const mumuTextDefaultUrl = '';
   const xiaomiMimoDefaultUrl = 'https://token-plan-cn.xiaomimimo.com/v1';
   const builtInKeyProviders = ['xiaomi_mimo'];
   const xiaomiMimoDefaultModels = [
     { value: 'mimo-v2.5', label: 'mimo-v2.5', description: 'Xiaomi MiMo 官方内置推荐模型' },
   ];
   const mumuCoverBaseUrlOptions = [
-    { value: 'https://zhongzhuan.mumuverse.space/v1beta', label: 'https://zhongzhuan.mumuverse.space/v1beta', defaultModel: 'gemini-3.1-flash-image-preview' },
-    { value: 'https://zhongzhuan.mumuverse.space/v1', label: 'https://zhongzhuan.mumuverse.space/v1', defaultModel: 'gpt-image-2' },
+    { value: 'https://generativelanguage.googleapis.com/v1beta', label: 'https://generativelanguage.googleapis.com/v1beta', defaultModel: 'gemini-2.5-flash-image' },
+    { value: 'https://api.x.ai/v1', label: 'https://api.x.ai/v1', defaultModel: 'grok-2-image' },
   ];
   const defaultCoverSettings = {
     cover_enabled: false,
@@ -312,9 +311,9 @@ export default function SettingsPage() {
   const apiProviders = [
     {
       value: 'mumu',
-      label: 'MuMuのAPI',
+      label: '自定义渠道（OpenAI 兼容）',
       defaultUrl: mumuTextDefaultUrl,
-      defaultModel: 'gemini-3-flash-preview'
+      defaultModel: ''
     },
     {
       value: 'xiaomi_mimo',
@@ -341,7 +340,7 @@ export default function SettingsPage() {
       }
       if (provider.value === 'mumu') {
         nextValues.api_key = '';
-        nextValues.llm_model = provider.defaultModel || 'gemini-3-flash-preview';
+        nextValues.llm_model = provider.defaultModel || form.getFieldValue('llm_model') || '';
       }
       if (builtInKeyProviders.includes(provider.value)) {
         nextValues.api_key = '';
@@ -357,7 +356,7 @@ export default function SettingsPage() {
   const coverApiProviders = [
     {
       value: 'mumu',
-      label: 'MuMuのAPI',
+      label: '自定义渠道（OpenAI 兼容）',
       defaultUrl: mumuCoverBaseUrlOptions[0].value,
       defaultModel: mumuCoverBaseUrlOptions[0].defaultModel,
     },
@@ -641,7 +640,7 @@ export default function SettingsPage() {
       }
       if (provider.value === 'mumu') {
         nextValues.api_key = '';
-        nextValues.llm_model = provider.defaultModel || 'gemini-3-flash-preview';
+        nextValues.llm_model = provider.defaultModel || presetForm.getFieldValue('llm_model') || '';
       }
       if (builtInKeyProviders.includes(provider.value)) {
         nextValues.api_key = '';
@@ -1265,20 +1264,12 @@ export default function SettingsPage() {
                             <Alert
                               type="info"
                               showIcon
-                              message="MuMuのAPI 专属供应商"
+                              message="兼容 OpenAI 格式的第三方渠道"
                               description={
                                 <Space direction="vertical" size={8} style={{ width: '100%' }}>
                                   <Text>
-                                    已自动填入专属地址，API Key 保持留空。免费注册后即可获取可用 Key。
+                                    已填入默认接口地址，可直接改用任意兼容 OpenAI 协议的渠道地址与自有 Key。
                                   </Text>
-                                  <div>
-                                    <Button
-                                      type="primary"
-                                      onClick={() => window.open(mumuRegisterUrl, '_blank', 'noopener,noreferrer')}
-                                    >
-                                      打开 MuMuのAPI 站点免费注册
-                                    </Button>
-                                  </div>
                                 </Space>
                               }
                               style={{ marginBottom: 16 }}
@@ -1809,20 +1800,12 @@ export default function SettingsPage() {
                           <Alert
                             type="info"
                             showIcon
-                            message="MuMuのAPI 专属适配器"
+                            message="兼容 OpenAI 格式的图片接口"
                             description={
                               <Space direction="vertical" size={8} style={{ width: '100%' }}>
                                 <Text>
-                                  已固定提供 MuMuのAPI 图片接口地址选项，切换地址时会自动带出推荐模型。API Key 需前往 MuMuのAPI 站点注册获取。
+                                  已提供常用图片接口地址选项，切换地址时会自动带出推荐模型。Key 请使用你自己的渠道凭据。
                                 </Text>
-                                <div>
-                                  <Button
-                                    type="primary"
-                                    onClick={() => window.open(mumuRegisterUrl, '_blank', 'noopener,noreferrer')}
-                                  >
-                                    打开 MuMuのAPI 站点免费注册
-                                  </Button>
-                                </div>
                               </Space>
                             }
                             style={{ marginBottom: 16 }}
@@ -1830,7 +1813,7 @@ export default function SettingsPage() {
                         )}
 
                         <Form.Item label="封面图片 API Key" name="cover_api_key" rules={[{ required: true, message: '请输入封面图片 API Key' }]}>
-                          <Input.Password size={isMobile ? 'middle' : 'large'} placeholder={selectedCoverProvider === 'mumu' ? '请输入 MuMuのAPI Key' : '输入封面图片 API Key'} autoComplete="new-password" />
+                          <Input.Password size={isMobile ? 'middle' : 'large'} placeholder={selectedCoverProvider === 'mumu' ? '请输入图片接口 Key' : '输入封面图片 API Key'} autoComplete="new-password" />
                         </Form.Item>
 
                         <Form.Item label="封面图片 API 地址" name="cover_api_base_url" rules={[{ type: 'url', message: '请输入有效的URL' }]}>
@@ -1943,7 +1926,7 @@ export default function SettingsPage() {
                   style={{ marginBottom: 16 }}
                 >
                   <Select placeholder="选择提供商" onChange={handlePresetProviderChange}>
-                    <Select.Option value="mumu">MuMuのAPI</Select.Option>
+                    <Select.Option value="mumu">自定义渠道（OpenAI 兼容）</Select.Option>
                     <Select.Option value="xiaomi_mimo">Xiaomi MiMo（内置）</Select.Option>
                     <Select.Option value="openai">OpenAI</Select.Option>
                     <Select.Option value="gemini">Google Gemini</Select.Option>
@@ -1954,20 +1937,12 @@ export default function SettingsPage() {
                   <Alert
                     type="info"
                     showIcon
-                    message="MuMuのAPI 专属供应商"
+                    message="兼容 OpenAI 格式的第三方渠道"
                     description={
                       <Space direction="vertical" size={8} style={{ width: '100%' }}>
                         <Text>
-                          已自动填入专属地址，API Key 保持留空。免费注册后即可获取可用 Key。
+                          已填入默认接口地址，可直接改用任意兼容 OpenAI 协议的渠道地址与自有 Key。
                         </Text>
-                        <div>
-                          <Button
-                            type="primary"
-                            onClick={() => window.open(mumuRegisterUrl, '_blank', 'noopener,noreferrer')}
-                          >
-                            打开 MuMuのAPI 站点免费注册
-                          </Button>
-                        </div>
                       </Space>
                     }
                     style={{ marginBottom: 16 }}

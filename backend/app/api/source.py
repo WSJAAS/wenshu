@@ -23,6 +23,7 @@ import hashlib
 import json
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -34,6 +35,7 @@ from app.config import settings
 from app.database import Base, get_db
 from app.logger import get_logger
 from app.services.fanqie_source import (
+    FREE_CHAPTER_COUNT,
     BatchFetcher, BlockedError, BookInfo, ChapterContent, ChapterRef,
     FanqieClient, FanqieError, build_missing_report, merge_results,
     results_to_txt,
@@ -889,4 +891,240 @@ async def handoff_to_book_import(
         "txt_chars": len(txt),
         "book_import_task": task.model_dump() if hasattr(task, "model_dump") else task,
         "note": "已交给拆书导入。后续在该任务的预览里确认并导入。",
+    }
+
+
+# ============================================================
+#  浏览器交接
+# ============================================================
+class HandoverRequest(BaseModel):
+    """浏览器脚本交过来的书。
+
+    字段可能不全 —— 用户脚本从页面里能认多少就给多少，
+    服务端以 book_id 或 item_id 为准，其余信息能补则补。
+    """
+
+    book_id: str = Field(default="", description="书籍 ID")
+    item_id: str = Field(default="", description="章节 ID（阅读页交接时用）")
+    title: str = Field(default="", description="书名（来自页面，仅作参考）")
+    author: str = Field(default="", description="作者（来自页面，仅作参考）")
+    chapter_total: int = Field(default=0, description="章节总数（来自页面）")
+    source_url: str = Field(default="", description="来源页面地址")
+    # 是否立即建取源任务。默认只登记，让用户在文枢里确认范围
+    create_task: bool = Field(default=False, description="是否立即抓取")
+    chapter_count: int = Field(default=10, ge=1, le=3000, description="create_task 时抓多少章")
+
+
+@router.post("/handover", summary="接收浏览器交来的书（用户脚本调用）")
+async def handover_from_browser(
+    payload: HandoverRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """接收用户在番茄页面选中的书。
+
+    这是「用户在网页选书」的落点：浏览器脚本把 book_id 与登录态发过来，
+    服务端负责后续抓取。**浏览器不参与内容搬运**，只递一个标识 ——
+    这样既不受混合内容限制，也不会拖慢用户的标签页。
+
+    取值优先级：book_id > item_id。
+    item_id 是章节标识，只有阅读页才有；此时需要反查所属书。
+    """
+    _require_enabled()
+    user_id = getattr(request.state, "user_id", None) or "local"
+
+    bid = (payload.book_id or "").strip()
+    iid = (payload.item_id or "").strip()
+
+    if not bid and not iid:
+        raise HTTPException(status_code=400, detail="未提供 book_id 或 item_id")
+
+    client = FanqieClient(interval=1.2)
+
+    # 只有 item_id 时，从阅读页反查所属书
+    if not bid and iid:
+        ref = client.resolve_book_by_item(iid)
+        if not ref:
+            raise HTTPException(
+                status_code=404,
+                detail=f"无法从章节 {iid} 反查所属书籍",
+            )
+        bid = ref
+
+    # 取详情：既确认书存在，也拿到服务端认定的书名与章数
+    try:
+        book, chapters = await asyncio.to_thread(client.fetch_book, bid)
+    except BlockedError as e:
+        raise HTTPException(status_code=429, detail=f"被风控拦截：{e}")
+    except FanqieError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    # Cookie 情况：决定锁定章能否取到全文
+    ck = cookie_status()
+    can_full_text = bool(ck.get("has_sessionid"))
+
+    # 书名以服务端为准。页面上的可能带字体混淆，或与平台登记不一致。
+    # 若差异明显，把页面的值一并回传，便于用户判断是不是选错了书。
+    title_mismatch = bool(
+        payload.title
+        and book.title
+        and payload.title.strip() != book.title.strip()
+    )
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "book_id": book.book_id,
+        "title": book.title,
+        "author": book.author,
+        "chapter_total": len(chapters),
+        "status": book.status,
+        "category": book.category,
+        "word_count": book.word_count,
+        "read_count": book.read_count,
+        "from_page_title": payload.title,
+        "title_mismatch": title_mismatch,
+        "login_ready": can_full_text,
+        "login_note": ck.get("note", ""),
+        "task_id": None,
+        "message": "",
+    }
+
+    if title_mismatch:
+        result["message"] = (
+            f"注意：页面显示「{payload.title}」，平台登记为「{book.title}」。"
+            "以平台登记为准。"
+        )
+
+    # 是否立即建任务
+    if payload.create_task:
+        picked = chapters[: payload.chapter_count]
+        task = SourceTask(
+            user_id=user_id,
+            book_id=bid,
+            status="pending",
+            message=f"已选 {len(picked)} 章（来自浏览器交接）",
+            book_title=book.title,
+            book_author=book.author,
+            total_chapters=len(picked),
+            requested_ranges=json.dumps(
+                {"preset": "first", "count": payload.chapter_count,
+                 "volume": "", "item_ids": []},
+                ensure_ascii=False,
+            ),
+            book_json=json.dumps(book.to_dict(), ensure_ascii=False),
+            catalog_json=json.dumps([c.to_dict() for c in chapters], ensure_ascii=False),
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+        asyncio.create_task(_run_task(
+            task.id,
+            selected_ids=[c.item_id for c in picked],
+            interval=1.2,
+            max_chapters=None,
+        ))
+        result["task_id"] = task.id
+        result["message"] = (
+            (result["message"] + " " if result["message"] else "")
+            + f"已创建取源任务，将抓取前 {len(picked)} 章。"
+        )
+        # 未登录时同样要提醒 —— 这条路径才是真去抓的，比只登记更需要说清
+        if not can_full_text:
+            preview_est = max(0, len(picked) - FREE_CHAPTER_COUNT)
+            if preview_est > 0:
+                result["message"] += (
+                    f" 当前未取得登录态，其中约 {preview_est} 章"
+                    f"（第 {FREE_CHAPTER_COUNT + 1} 章起）只能取到试读片段。"
+                    " 如需全文，请在番茄页面登录后再交接一次。"
+                )
+            else:
+                result["message"] += (
+                    f" 当前未取得登录态，但所选 {len(picked)} 章都在"
+                    f"前 {FREE_CHAPTER_COUNT} 章的免费范围内，可以取到全文。"
+                )
+    else:
+        # 只登记，让用户回到文枢再确认范围
+        result["message"] = (
+            (result["message"] + " " if result["message"] else "")
+            + "已在文枢登记。回到书源页面即可选择抓取范围。"
+        )
+        if not can_full_text:
+            result["message"] += (
+                f" 当前未取得登录态，第 {FREE_CHAPTER_COUNT + 1} 章起"
+                "只能取到试读片段 —— 请在番茄页面登录后再交接一次。"
+            )
+
+    return result
+
+
+@router.get("/handover/summary", summary="最近接收的浏览器交接")
+async def recent_handovers(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=10, ge=1, le=50),
+):
+    """列出最近的取源任务，供前端显示「刚从浏览器交来的书」。"""
+    _require_enabled()
+    user_id = getattr(request.state, "user_id", None) or "local"
+    rows = (await db.execute(
+        select(SourceTask)
+        .where(SourceTask.user_id == user_id)
+        .order_by(SourceTask.created_at.desc())
+        .limit(limit)
+    )).scalars().all()
+    return [_task_to_summary(t) for t in rows]
+
+
+@router.get("/userscript.user.js", summary="浏览器联动脚本（安装用）")
+async def get_userscript():
+    """提供用户脚本本体。
+
+    从本机服务提供而不是让用户去第三方站点装，有两个好处：
+      - 脚本永远与当前后端版本匹配，不会出现接口对不上
+      - 来源是本机，用户能自己读一遍代码再装
+
+    脚本里的默认地址会自动替换成当前服务地址，用户装完即用。
+    """
+    script_path = Path(__file__).resolve().parents[3] / "tools" / "fanqie-handover.user.js"
+    if not script_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"找不到脚本文件：{script_path}",
+        )
+
+    text = script_path.read_text(encoding="utf-8")
+
+    # 返回纯文本，让浏览器/油猴识别为可安装脚本
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(
+        content=text,
+        media_type="text/javascript; charset=utf-8",
+        headers={
+            # 便于用户直接查看源码，而不是被下载成文件
+            "Content-Disposition": 'inline; filename="fanqie-handover.user.js"',
+        },
+    )
+
+
+@router.get("/handover/guide", summary="浏览器联动的使用说明")
+async def handover_guide():
+    """给前端的安装指引，含当前服务地址。"""
+    _require_enabled()
+    ck = cookie_status()
+    return {
+        "userscript_url": "/api/source/userscript.user.js",
+        "steps": [
+            "安装浏览器扩展 Tampermonkey（油猴）",
+            "点击下方按钮安装「文枢 · 番茄联动」脚本",
+            "在番茄小说登录你的账号",
+            "打开任意书籍页，点右下角「交给文枢」",
+        ],
+        "notes": [
+            "脚本只把书籍标识和 Cookie 发到本机 127.0.0.1，不经过任何第三方。",
+            "Cookie 只保存在本机数据目录，不入库、不进 git。",
+            "登录后第 11 章起才能取到全文；未登录只能取到约 200 字的试读片段。",
+        ],
+        "login_ready": bool(ck.get("has_sessionid")),
+        "login_note": ck.get("note", ""),
     }

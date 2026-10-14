@@ -33,6 +33,7 @@ import type {
   AcceptResponse,
   AcceptRecord,
   ApiConfigStatus,
+  SourceHandoverGuide,
   SourceStatus,
   SourceLoginState,
   SourceRankResponse,
@@ -1137,6 +1138,17 @@ export const sourceApi = {
       book_import_task: { task_id: string; status: string };
       note: string;
     }>(`/source/tasks/${taskId}/to-book-import`),
+
+  /** 浏览器联动的安装指引 */
+  handoverGuide: () =>
+    api.get<unknown, SourceHandoverGuide>('/source/handover/guide'),
+
+  /** 浏览器脚本的安装地址（直接下载，不走 axios） */
+  userscriptUrl: () => '/api/source/userscript.user.js',
+
+  /** 最近的交接记录 */
+  handoverSummary: (limit = 10) =>
+    api.get<unknown, SourceTask[]>(`/source/handover/summary?limit=${limit}`),
 };
 
 export const inspirationApi = {

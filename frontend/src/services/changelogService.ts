@@ -36,8 +36,8 @@ export interface ChangelogEntry {
 }
 
 const GITHUB_API_BASE = 'https://api.github.com';
-const REPO_OWNER = 'xiamuceer-j';
-const REPO_NAME = 'MuMuAINovel';
+const REPO_OWNER = 'WSJAAS';
+const REPO_NAME = 'wenshu';
 
 /**
  * 提交类型映射表
@@ -152,7 +152,7 @@ function parseCommitType(message: string): { type: ChangelogEntry['type']; scope
  */
 export async function fetchGitHubCommits(page: number = 1, perPage: number = 30): Promise<GitHubCommit[]> {
   try {
-    const url = `${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/commits?author=${REPO_OWNER}&page=${page}&per_page=${perPage}`;
+    const url = `${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/commits?page=${page}&per_page=${perPage}`;
     
     const response = await fetch(url, {
       method: 'GET',

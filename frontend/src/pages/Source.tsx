@@ -50,6 +50,7 @@ import { sourceApi } from '../services/api';
 import type {
   SourceBookResponse,
   SourceChapterResult,
+  SourceHandoverGuide,
   SourceLoginState,
   SourceRankItem,
   SourceRankResponse,
@@ -152,6 +153,9 @@ export default function Source() {
   const [chapters, setChapters] = useState<SourceTaskChaptersResponse | null>(null);
   const [tasks, setTasks] = useState<SourceTask[]>([]);
 
+  /** 浏览器联动的安装指引。拿不到就不显示这一块。 */
+  const [guide, setGuide] = useState<SourceHandoverGuide | null>(null);
+
   const categories = useMemo(
     () => [...new Set((rank?.items ?? []).map((item) => item.category).filter((value): value is string => !!value))],
     [rank],
@@ -202,6 +206,19 @@ export default function Source() {
   useEffect(() => {
     if (enabled) void loadLogin();
   }, [enabled, loadLogin]);
+
+  // ---- 浏览器联动指引 ----
+  const loadGuide = useCallback(async () => {
+    try {
+      setGuide(await sourceApi.handoverGuide());
+    } catch {
+      /* 拿不到指引就不显示这一块 */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (enabled) void loadGuide();
+  }, [enabled, loadGuide]);
 
   const saveLogin = useCallback(async () => {
     setSavingLogin(true);
@@ -361,6 +378,26 @@ export default function Source() {
     window.open(sourceApi.txtUrl(task.task_id), '_blank');
   };
 
+  /**
+   * 打开脚本地址。
+   *
+   * 直接访问 .user.js 会被浏览器当文件下载；装好油猴后打开同地址
+   * 才会弹出安装页。所以这里也给「复制地址」的备选。
+   */
+  const installScript = () => {
+    window.open(sourceApi.userscriptUrl(), '_blank');
+  };
+
+  const copyScriptUrl = async () => {
+    const url = `${window.location.origin}${sourceApi.userscriptUrl()}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      msgApi.success('脚本地址已复制。装好油猴后打开该地址即可安装。');
+    } catch {
+      msgApi.info(url);
+    }
+  };
+
   // ============================================================
   //  未启用
   // ============================================================
@@ -473,6 +510,39 @@ export default function Source() {
                   Cookie 只在本机保存并原样转发，不入库、不进 git。
                   {login.saved_to ? ` 位置：${login.saved_to}` : ''}
                 </Paragraph>
+
+                {/* 更省事的做法：让浏览器脚本自动带回登录态与书籍 */}
+                {guide && (
+                  <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px dashed rgba(0,0,0,.1)' }}>
+                    <Text strong style={{ fontSize: 13 }}>
+                      省事做法：装一次浏览器脚本，之后自动带回
+                    </Text>
+                    <Paragraph type="secondary" style={{ fontSize: 12, margin: '6px 0 10px' }}>
+                      装好后，你在番茄网页上看到哪本书，点一下「交给文枢」——
+                      书籍和登录态一起送过来，不用再手工粘 Cookie。
+                    </Paragraph>
+                    <Space wrap>
+                      <Button type="primary" ghost size="small" onClick={installScript}>
+                        安装浏览器脚本
+                      </Button>
+                      <Button size="small" onClick={() => void copyScriptUrl()}>
+                        复制脚本地址
+                      </Button>
+                    </Space>
+                    <div style={{ marginTop: 10 }}>
+                      {guide.steps.map((s, i) => (
+                        <div key={i} style={{ fontSize: 12, color: 'rgba(0,0,0,.55)', lineHeight: 1.9 }}>
+                          {i + 1}. {s}
+                        </div>
+                      ))}
+                    </div>
+                    <Paragraph type="secondary" style={{ fontSize: 11, marginTop: 8, marginBottom: 0 }}>
+                      {guide.notes.map((n, i) => (
+                        <span key={i}>{n}{i < guide.notes.length - 1 ? ' ' : ''}</span>
+                      ))}
+                    </Paragraph>
+                  </div>
+                )}
               </div>
             }
           />

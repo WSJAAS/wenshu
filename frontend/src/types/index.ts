@@ -724,6 +724,36 @@ export interface SourceLoginState {
   saved_to?: string;
 }
 
+/** 浏览器联动的安装指引 */
+export interface SourceHandoverGuide {
+  userscript_url: string;
+  steps: string[];
+  notes: string[];
+  login_ready: boolean;
+  login_note: string;
+}
+
+/** 浏览器交接的返回 */
+export interface SourceHandoverResult {
+  ok: boolean;
+  book_id: string;
+  title: string;
+  author: string;
+  chapter_total: number;
+  status: string;
+  category: string;
+  word_count: number;
+  read_count: number;
+  /** 页面上显示的书名（可能带混淆或与平台不一致） */
+  from_page_title: string;
+  /** 页面书名与平台登记不一致 */
+  title_mismatch: boolean;
+  login_ready: boolean;
+  login_note: string;
+  task_id: string | null;
+  message: string;
+}
+
 export interface SourceRankItem {
   book_id: string;
   /** 干净书名（详情页补取。补取失败时退回榜单页书名，可能带混淆） */
