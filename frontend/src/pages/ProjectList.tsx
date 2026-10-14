@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Card, Button, Modal, message, Spin, Space, Tag, Typography, Upload, Checkbox, Tooltip, Drawer, Menu, theme, Badge } from 'antd';
-import { EditOutlined, BookOutlined, CalendarOutlined, FileTextOutlined, TrophyOutlined, SettingOutlined, UploadOutlined, ApiOutlined, FileSearchOutlined, MenuUnfoldOutlined, MenuFoldOutlined, BulbOutlined, MoonOutlined, DesktopOutlined, MailOutlined, BellOutlined } from '@ant-design/icons';
+import { EditOutlined, BookOutlined, CalendarOutlined, FileTextOutlined, TrophyOutlined, SettingOutlined, UploadOutlined, ApiOutlined, FileSearchOutlined, MenuUnfoldOutlined, MenuFoldOutlined, BulbOutlined, MoonOutlined, DesktopOutlined, MailOutlined, BellOutlined, CloudDownloadOutlined } from '@ant-design/icons';
 import { authApi, projectApi } from '../services/api';
 import { useStore } from '../store';
 import { useProjectSync } from '../store/hooks';
@@ -17,6 +17,7 @@ import SystemSettingsPage from './SystemSettings';
 import MCPPluginsPage from './MCPPlugins';
 import PromptTemplates from './PromptTemplates';
 import BookImport from './BookImport';
+import Source from './Source';
 import BookshelfPage from './BookshelfPage';
 import { getStoredSidebarCollapsed, setStoredSidebarCollapsed } from '../utils/sidebarState';
 import AnnouncementTimelineModal from '../components/AnnouncementTimelineModal';
@@ -44,11 +45,11 @@ const formatWordCount = (count: number): string => {
   }
 };
 
-type ProjectListView = 'projects' | 'settings' | 'system-settings' | 'mcp' | 'prompts' | 'book-import';
+type ProjectListView = 'projects' | 'settings' | 'system-settings' | 'mcp' | 'prompts' | 'book-import' | 'source';
 
 const parseViewFromSearch = (search: string): ProjectListView => {
   const view = new URLSearchParams(search).get('view');
-  if (view === 'settings' || view === 'system-settings' || view === 'mcp' || view === 'prompts' || view === 'book-import' || view === 'projects') {
+  if (view === 'settings' || view === 'system-settings' || view === 'mcp' || view === 'prompts' || view === 'book-import' || view === 'source' || view === 'projects') {
     return view;
   }
   return 'projects';
@@ -402,11 +403,13 @@ export default function ProjectList() {
       ? '提示词模板'
       : activeView === 'book-import'
         ? '拆书导入'
-        : activeView === 'mcp'
-          ? 'MCP 插件'
-          : activeView === 'system-settings'
-            ? '系统设置'
-            : 'API 设置';
+        : activeView === 'source'
+          ? '在线书源'
+          : activeView === 'mcp'
+            ? 'MCP 插件'
+            : activeView === 'system-settings'
+              ? '系统设置'
+              : 'API 设置';
 
   const isAdmin = !!currentUser?.is_admin;
 
@@ -424,6 +427,11 @@ export default function ProjectList() {
           key: 'book-import',
           icon: <UploadOutlined />,
           label: '拆书导入',
+        },
+        {
+          key: 'source',
+          icon: <CloudDownloadOutlined />,
+          label: '在线书源',
         },
         {
           key: 'mcp',
@@ -470,6 +478,11 @@ export default function ProjectList() {
       key: 'book-import',
       icon: <UploadOutlined />,
       label: '拆书导入',
+    },
+    {
+      key: 'source',
+      icon: <CloudDownloadOutlined />,
+      label: '在线书源',
     },
     {
       key: 'mcp',
@@ -894,6 +907,8 @@ export default function ProjectList() {
           {activeView === 'prompts' && <PromptTemplates />}
           
           {activeView === 'book-import' && <BookImport />}
+
+          {activeView === 'source' && <Source />}
           
           {activeView === 'projects' && (
             <BookshelfPage

@@ -32,6 +32,12 @@ import type {
   PolishBatchResponse,
   AcceptResponse,
   AcceptRecord,
+  SourceStatus,
+  SourceRankResponse,
+  SourceBookResponse,
+  SourceTask,
+  SourceTaskChaptersResponse,
+  SourceSelection,
   GenerateCharactersResponse,
   GenerateOutlineResponse,
   Settings,
@@ -1057,6 +1063,64 @@ export const polishApi = {
   /** 引擎可用状态 */
   engine: () => api.get<unknown, { available: boolean; dir: string }>('/polish/engine'),
 };
+/** 书源 API。默认关闭（后端 FANQIE_ENABLED）。关闭时接口返回 403。 */
+export const sourceApi = {
+  /** 模块开关状态。前端据此决定是否显示书源入口。 */
+  status: () => api.get<unknown, SourceStatus>('/source/status'),
+
+  /** 榜单。返回里含覆盖范围与时间口径说明，必须如实展示。 */
+  rank: (enrich = true, interval = 1.2) =>
+    api.get<unknown, SourceRankResponse>(
+      `/source/rank?enrich=${enrich}&interval=${interval}`
+    ),
+
+  /** 书籍详情与完整目录 */
+  book: (bookId: string, interval = 1.2) =>
+    api.get<unknown, SourceBookResponse>(
+      `/source/book/${encodeURIComponent(bookId)}?interval=${interval}`
+    ),
+
+  /** 创建取源任务 */
+  createTask: (payload: {
+    book_id: string;
+    selection: SourceSelection;
+    interval?: number;
+    max_chapters?: number | null;
+  }) => api.post<unknown, SourceTask>('/source/tasks', payload),
+
+  /** 任务列表 */
+  tasks: (limit = 30) =>
+    api.get<unknown, SourceTask[]>(`/source/tasks?limit=${limit}`),
+
+  /** 任务状态 */
+  task: (taskId: string) =>
+    api.get<unknown, SourceTask>(`/source/tasks/${taskId}`),
+
+  /** 分章结果与缺章清单 */
+  taskChapters: (taskId: string, includeText = false) =>
+    api.get<unknown, SourceTaskChaptersResponse>(
+      `/source/tasks/${taskId}/chapters?include_text=${includeText}`
+    ),
+
+  /** 导出 TXT 的下载地址（直接用链接下载，不走 axios） */
+  txtUrl: (taskId: string) => `/api/source/tasks/${taskId}/txt`,
+
+  /** 取消任务 */
+  cancel: (taskId: string) =>
+    api.post<unknown, SourceTask>(`/source/tasks/${taskId}/cancel`),
+
+  /** 把取源结果交给拆书导入，返回拆书任务信息 */
+  toBookImport: (taskId: string) =>
+    api.post<unknown, {
+      ok: boolean;
+      book_title: string;
+      handed_chapters: number;
+      txt_chars: number;
+      book_import_task: { task_id: string; status: string };
+      note: string;
+    }>(`/source/tasks/${taskId}/to-book-import`),
+};
+
 export const inspirationApi = {
   // 生成选项建议
   generateOptions: (data: {

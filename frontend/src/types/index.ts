@@ -685,6 +685,143 @@ export interface AcceptResponse {
   versions: number;
 }
 
+// ============================================================
+//  书源
+// ============================================================
+export interface SourceStatus {
+  enabled: boolean;
+  module: string;
+  note: string;
+}
+
+export interface SourceRankItem {
+  book_id: string;
+  /** 干净书名（详情页补取。补取失败时退回榜单页书名，可能带混淆） */
+  title: string;
+  title_raw?: string;
+  title_decoded?: string;
+  /** 书名是否可能带字体混淆（详情补取失败时） */
+  title_may_be_garbled?: boolean;
+  author: string;
+  category?: string;
+  tags?: string[];
+  status?: string;
+  read_count: number;
+  /** 榜单原始读数，可能与 read_count 不同 */
+  read_count_raw?: number;
+  read_count_alt?: number;
+  word_count: number;
+  abstract?: string;
+  cover_url?: string;
+  last_chapter_title?: string;
+  rank_diff?: unknown;
+  enriched?: boolean;
+  enrich_error?: string;
+}
+
+export interface SourceRankResponse {
+  items: SourceRankItem[];
+  fetched: number;
+  /** 平台声明的总数。首屏通常只返回部分，必须如实展示覆盖范围 */
+  declared_total: number;
+  enriched: number;
+  enrich_failed: number;
+  garbled_titles: number;
+  coverage_note: string;
+  is_complete: boolean;
+  platform_note: string;
+}
+
+export interface SourceChapterRef {
+  item_id: string;
+  title: string;
+  volume: string;
+  order: number;
+  /** 仅参考：不在免费试读段。实测不代表不可读 */
+  is_locked: boolean;
+  need_pay: boolean;
+}
+
+export interface SourceBookInfo {
+  book_id: string;
+  title: string;
+  author: string;
+  abstract: string;
+  category: string;
+  tags: string[];
+  word_count: number;
+  read_count: number;
+  status: string;
+  cover_url: string;
+  source_url: string;
+  last_chapter_title: string;
+}
+
+export interface SourceBookResponse {
+  book: SourceBookInfo;
+  chapters: SourceChapterRef[];
+  volumes: Array<{ name: string; count: number }>;
+  lock_field_note: string;
+}
+
+export interface SourceTask {
+  task_id: string;
+  status: string;
+  message: string;
+  error: string;
+  book_id: string;
+  book_title: string;
+  total_chapters: number;
+  done_count: number;
+  ok_count: number;
+  failed_count: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface SourceChapterResult {
+  order: number;
+  item_id: string;
+  title: string;
+  volume: string;
+  /** ok / locked / unavailable / garbled / failed / not_fetched */
+  status: string;
+  error: string;
+  chars: number;
+  pua_before: number;
+  pua_after: number;
+  text?: string;
+}
+
+export interface SourceMissingReport {
+  total: number;
+  ok: number;
+  missing_count: number;
+  by_status: Record<string, number>;
+  missing: Array<{
+    order: number;
+    item_id: string;
+    title: string;
+    volume: string;
+    status: string;
+    error: string;
+  }>;
+}
+
+export interface SourceTaskChaptersResponse {
+  task: SourceTask;
+  chapters: SourceChapterResult[];
+  report: SourceMissingReport;
+  scope_note: string;
+}
+
+export interface SourceSelection {
+  preset: 'first' | 'volume' | 'all' | 'ids';
+  count: number;
+  volume: string;
+  item_ids: string[];
+}
+
 // 向导API响应类型
 export interface GenerateCharactersResponse {
   characters: Character[];

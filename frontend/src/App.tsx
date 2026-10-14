@@ -24,6 +24,7 @@ import SkillChat from './pages/SkillChat';
 import SkillManage from './pages/SkillManage';
 import Sponsor from './pages/Sponsor';
 import Polish from './pages/Polish';
+import Source from './pages/Source';
 import Login from './pages/Login';
 import AuthCallback from './pages/AuthCallback';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -52,6 +53,7 @@ function App() {
           <Route path="/inspiration" element={<ProtectedRoute><Inspiration /></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
           <Route path="/prompt-templates" element={<ProtectedRoute><><PromptTemplates /><AppFooter /></></ProtectedRoute>} />
+          <Route path="/source" element={<ProtectedRoute><><Source /><AppFooter sidebarWidth={220} /></></ProtectedRoute>} />
           <Route path="/mcp-plugins" element={<ProtectedRoute><MCPPlugins /></ProtectedRoute>} />
           <Route path="/user-management" element={<ProtectedRoute><UserManagement /></ProtectedRoute>} />
           <Route path="/chapters/:chapterId/reader" element={<ProtectedRoute><ChapterReader /></ProtectedRoute>} />
