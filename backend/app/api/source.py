@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import uuid
 from datetime import datetime
@@ -72,6 +73,8 @@ class SourceTask(Base):
 
     # 逐章结果：{item_id: ChapterContent dict}
     chapters_json = Column(Text, default="{}")
+    # 全部正文的内容指纹（SHA256）。用于验证任务隔离、校验迁移一致性。
+    chapters_digest = Column(String(64), default="")
     # 目录快照
     catalog_json = Column(Text, default="[]")
     # 书籍信息快照
@@ -123,6 +126,8 @@ class TaskSummary(BaseModel):
     done_count: int = 0
     ok_count: int = 0
     failed_count: int = 0
+    # 内容指纹：验证任务隔离与迁移一致性
+    chapters_digest: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -203,32 +208,100 @@ def _task_to_summary(t: SourceTask) -> TaskSummary:
         done_count=t.done_count or 0,
         ok_count=t.ok_count or 0,
         failed_count=t.failed_count or 0,
+        chapters_digest=getattr(t, "chapters_digest", "") or "",
         created_at=t.created_at,
         updated_at=t.updated_at,
     )
 
 
+# ChapterContent 的全部字段。读取时需要校验，避免字段缺失被静默填空。
+_CHAPTER_FIELDS = (
+    "item_id", "title", "text", "volume", "order",
+    "status", "error", "pua_before", "pua_after", "chars",
+)
+# 缺了这些字段说明数据不可用，必须报错而不是静默补默认值
+_CHAPTER_REQUIRED = ("item_id", "status")
+
+
 def _load_chapters(t: SourceTask) -> dict[str, ChapterContent]:
+    """从任务里读回逐章结果。
+
+    严格校验：必填字段缺失时抛错，而不是静默填空。
+
+    早期实现只挑已知字段，缺什么就用 dataclass 的默认值补上。
+    那样的后果是：若数据结构变化（比如 text 改名），
+    会得到一批「状态 ok 但正文为空」的记录却不报错 ——
+    错误被推迟到用户看到空内容时才暴露。
+
+    宁可在这里就明确失败。
+    """
     try:
         raw = json.loads(t.chapters_json or "{}")
-    except json.JSONDecodeError:
-        return {}
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"任务 {t.id} 的 chapters_json 不是合法 JSON：{e}"
+        ) from e
+
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"任务 {t.id} 的 chapters_json 应为对象，实际是 {type(raw).__name__}"
+        )
+
     out: dict[str, ChapterContent] = {}
-    for k, v in raw.items():
-        if isinstance(v, dict):
-            out[k] = ChapterContent(**{
-                f: v.get(f) for f in (
-                    "item_id", "title", "text", "volume", "order",
-                    "status", "error", "pua_before", "pua_after", "chars",
-                ) if f in v
-            } | {"item_id": v.get("item_id", k)})
+    for key, v in raw.items():
+        if not isinstance(v, dict):
+            raise ValueError(f"任务 {t.id} 的章节 {key} 不是对象")
+
+        missing = [f for f in _CHAPTER_REQUIRED if not v.get(f)]
+        if missing:
+            raise ValueError(
+                f"任务 {t.id} 的章节 {key} 缺少必填字段 {missing}；"
+                f"实际字段为 {sorted(v.keys())}"
+            )
+
+        payload = {f: v[f] for f in _CHAPTER_FIELDS if f in v}
+        # item_id 以记录键为准（键即 item_id），但保留原值以便发现不一致
+        if "item_id" not in payload:
+            payload["item_id"] = key
+        elif str(payload["item_id"]) != str(key):
+            raise ValueError(
+                f"任务 {t.id} 的章节键 {key} 与记录内 item_id "
+                f"{payload['item_id']} 不一致"
+            )
+
+        out[key] = ChapterContent(**payload)
+
     return out
 
 
 def _save_chapters(t: SourceTask, results: dict[str, ChapterContent]) -> None:
-    t.chapters_json = json.dumps(
-        {k: v.to_dict() for k, v in results.items()}, ensure_ascii=False
-    )
+    """写入逐章结果。
+
+    同时计算内容指纹，让「这个任务的内容没被别的任务污染」可被验证。
+    """
+    payload = {k: v.to_dict() for k, v in results.items()}
+    t.chapters_json = json.dumps(payload, ensure_ascii=False)
+    t.chapters_digest = _content_digest(results)
+
+
+def _content_digest(results: dict[str, ChapterContent]) -> str:
+    """对全部正文算一个 SHA256，作为这一批内容的指纹。
+
+    用途：
+      - 验证任务之间的隔离（A 的指纹不应出现在 B 里）
+      - 迁移时校验搬的是同一份内容
+    为了让指纹稳定，按 item_id 排序后再喂给哈希。
+    """
+    h = hashlib.sha256()
+    for item_id in sorted(results.keys()):
+        c = results[item_id]
+        h.update(item_id.encode("utf-8"))
+        h.update(b"\x00")
+        h.update((c.text or "").encode("utf-8"))
+        h.update(b"\x00")
+        h.update((c.status or "").encode("utf-8"))
+        h.update(b"\x1e")   # 记录分隔符，避免拼接歧义
+    return h.hexdigest()
 
 
 def _load_catalog(t: SourceTask) -> list[ChapterRef]:

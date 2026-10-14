@@ -29,6 +29,7 @@ import asyncio
 import json
 import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -179,17 +180,41 @@ class ChapterContent:
 # ============================================================
 #  HTTP
 # ============================================================
-_last_request_at = 0.0
+#
+# 限速时钟的归属：早期实现用模块级全局 `_last_request_at`，
+# 所有任务共享同一个时钟。那会让两个任务互相干扰 ——
+# 后发起的任务要等前一个任务的间隔期满，任务之间不再独立。
+#
+# 现在时钟挂在 RateLimiter 实例上，每个抓取任务持有一个独立实例，
+# 各自计自己的间隔。这样：
+#   - 任务之间互不等待（符合「任务互不干扰」）
+#   - 单任务内部仍然严格串行限速
+#
+# 注意线程安全：同一个 limiter 可能被 asyncio.to_thread 的工作线程调用，
+# 因此加锁。不同 limiter 之间无锁竞争。
+class RateLimiter:
+    """独立限速器。每个抓取任务持有一个。"""
 
+    __slots__ = ("interval", "jitter", "_last_at", "_lock")
 
-def _throttle_sync(interval: float, jitter: float) -> None:
-    """同步限速：保证两次请求之间至少有 interval 秒。"""
-    global _last_request_at
-    now = time.monotonic()
-    wait = interval + random.uniform(0, jitter) - (now - _last_request_at)
-    if wait > 0:
-        time.sleep(wait)
-    _last_request_at = time.monotonic()
+    def __init__(self, interval: float, jitter: float) -> None:
+        self.interval = max(0.0, float(interval))
+        self.jitter = max(0.0, float(jitter))
+        self._last_at = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self) -> None:
+        """阻塞到距上次请求满 interval（含抖动）。"""
+        with self._lock:
+            now = time.monotonic()
+            gap = self.interval + random.uniform(0, self.jitter)
+            wait = gap - (now - self._last_at)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_at = time.monotonic()
+
+    def to_dict(self) -> dict[str, float]:
+        return {"interval": self.interval, "jitter": self.jitter}
 
 
 def _looks_blocked(html: str) -> bool:
@@ -504,13 +529,16 @@ class FanqieClient:
         self.timeout = timeout
         self.backoff_base = backoff_base
         self.request_count = 0
+        # 每个客户端（即每个抓取任务）持有独立限速器，
+        # 任务之间不共享时钟，互不等待。
+        self.limiter = RateLimiter(interval, jitter)
 
     def _get(self, url: str) -> str:
         """带限速与退避的取页。"""
         last_error: Exception | None = None
 
         for attempt in range(self.max_retries + 1):
-            _throttle_sync(self.interval, self.jitter)
+            self.limiter.wait()
             self.request_count += 1
             try:
                 html = _fetch_html_sync(url, self.timeout)

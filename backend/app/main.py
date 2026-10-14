@@ -52,6 +52,29 @@ def get_static_media_type(path: Path) -> str:
     )
 
 
+def _ensure_source_task_columns(sync_conn) -> None:
+    """给已存在的 source_tasks 表补齐后加的列。
+
+    SQLite 的 CREATE TABLE IF NOT EXISTS 不会给旧表加列，
+    因此新加的字段需要显式 ALTER。这里做成幂等的：
+    先查现有列，缺什么补什么。
+    """
+    from sqlalchemy import inspect as sa_inspect, text as sa_text
+
+    inspector = sa_inspect(sync_conn)
+    if "source_tasks" not in inspector.get_table_names():
+        return
+
+    existing = {c["name"] for c in inspector.get_columns("source_tasks")}
+    wanted = {
+        "chapters_digest": "VARCHAR(64) DEFAULT ''",
+    }
+    for col, ddl in wanted.items():
+        if col not in existing:
+            sync_conn.execute(sa_text(f"ALTER TABLE source_tasks ADD COLUMN {col} {ddl}"))
+            logger.info(f"source_tasks 补列: {col}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
@@ -80,6 +103,12 @@ async def lifespan(app: FastAPI):
                 await conn.run_sync(
                     lambda sync_conn: SourceTask.__table__.create(sync_conn, checkfirst=True)
                 )
+
+                # 补列：旧库没有 chapters_digest（内容指纹）。
+                # create(checkfirst=True) 不会给已存在的表加列，
+                # 所以要显式检查并补上。
+                await conn.run_sync(_ensure_source_task_columns)
+
                 await conn.execute(
                     sql_update(SourceTask)
                     .where(SourceTask.status.in_(["pending", "running"]))
