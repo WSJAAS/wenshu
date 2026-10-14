@@ -784,12 +784,20 @@ export interface SourceChapterResult {
   item_id: string;
   title: string;
   volume: string;
-  /** ok / locked / unavailable / garbled / failed / not_fetched */
+  /**
+   * ok        完整取得（长度与平台申报相符）
+   * preview   只取得试读片段（未登录时锁定章被服务端截断成约 200 字符）
+   * locked / unavailable / garbled / failed / not_fetched
+   */
   status: string;
   error: string;
   chars: number;
   pua_before: number;
   pua_after: number;
+  /** 平台是否标记该章不在免费试读段 */
+  is_locked?: boolean;
+  /** 平台申报的该章字数，用于判定截断 */
+  claimed_words?: number;
   text?: string;
 }
 
@@ -798,6 +806,10 @@ export interface SourceMissingReport {
   ok: number;
   missing_count: number;
   by_status: Record<string, number>;
+  /** 只取得试读片段的章数（未登录时锁定章被截断） */
+  preview_count?: number;
+  /** 这些片段合计多少字 */
+  preview_chars?: number;
   missing: Array<{
     order: number;
     item_id: string;
@@ -805,6 +817,11 @@ export interface SourceMissingReport {
     volume: string;
     status: string;
     error: string;
+    chars?: number;
+    /** 平台申报字数 */
+    claimed_words?: number;
+    /** 相对申报还差多少字 */
+    missing_words?: number;
   }>;
 }
 

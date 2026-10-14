@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
 import threading
@@ -57,8 +58,93 @@ DEFAULT_MAX_RETRIES = 3             # 单请求最多重试
 DEFAULT_TIMEOUT = 30                # 单请求超时
 DEFAULT_BACKOFF_BASE = 2.0          # 退避基数（秒）
 
+# 截断判定阈值：实际字数低于「平台申报字数 × 该比例」即视为只拿到预览。
+#
+# 取 0.6 而不是更贴近 1.0 的值，是因为正文长度本身有浮动
+# （实测同一章解码后与申报值差几个字很常见），但截断的差距
+# 是数量级的 —— 未登录时 locked 章的 content 恒为 200 个字符，
+# 而申报值在 2000 上下，比例约 0.08。0.6 两者都能清楚分开，
+# 又不会被正常浮动误伤。
+TRUNCATION_RATIO = 0.6
+
 # 单章抓取最多等待多久，超时算失败
 CHAPTER_FETCH_TIMEOUT = 60
+
+
+# ============================================================
+#  登录态
+#
+#  未登录时，`isChapterLock=true` 的章只能拿到约 200 字符的预览
+#  （页面提示「会员登录后，可在网页畅读全文」）。要取全文就得带上
+#  登录后的 Cookie。
+#
+#  Cookie 从哪来：用户在浏览器登录番茄后，从开发者工具里复制。
+#  这里只做「原样转发」，不解密、不代管账号；存哪由调用方决定
+#  （本项目存在工作区配置目录，不入库、不进 git）。
+# ============================================================
+def load_login_cookie() -> str:
+    """读取用户配置的登录 Cookie。
+
+    顺序：环境变量 FANQIE_COOKIE > 配置文件。
+    返回空字符串表示未配置（此时只能取到免费章）。
+    """
+    env = os.getenv("FANQIE_COOKIE", "").strip()
+    if env:
+        return env
+
+    path = _cookie_file_path()
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError as e:
+            logger.warning("读取登录 Cookie 失败: %s", e)
+    return ""
+
+
+def _cookie_file_path() -> str:
+    """Cookie 存放位置。刻意放在代码目录之外，避免误提交。"""
+    data_dir = os.getenv("MUMU_DATA_DIR", "").strip()
+    if data_dir:
+        return os.path.join(data_dir, "fanqie_cookie.txt")
+    return ""
+
+
+def save_login_cookie(cookie: str) -> str:
+    """保存登录 Cookie，返回落盘路径。空串表示清除。"""
+    path = _cookie_file_path()
+    if not path:
+        raise FanqieError(
+            "未配置 MUMU_DATA_DIR，无法确定 Cookie 存放位置"
+        )
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write((cookie or "").strip())
+    return path
+
+
+def cookie_status() -> dict[str, Any]:
+    """登录态概况 —— 只报有没有、长什么样，不回显完整值。"""
+    ck = load_login_cookie()
+    if not ck:
+        return {
+            "configured": False,
+            "has_sessionid": False,
+            "names": [],
+            "note": "未配置登录态，锁定章只能取到约 200 字符的试读片段。",
+        }
+    names = []
+    for part in ck.split(";"):
+        if "=" in part:
+            n = part.split("=", 1)[0].strip()
+            if n:
+                names.append(n)
+    return {
+        "configured": True,
+        "has_sessionid": any(n in ("sessionid", "sessionid_ss") for n in names),
+        "names": names[:30],
+        "note": "已配置登录态。",
+    }
 
 
 # ============================================================
@@ -155,12 +241,25 @@ class ChapterContent:
     text: str = ""
     volume: str = ""
     order: int = 0
-    # 逐章状态：ok / locked / unavailable / garbled / failed
+    # 逐章状态：ok / preview / locked / unavailable / garbled / failed
+    #
+    # preview 是必须单独存在的一档。早先的实现没有它，把
+    # 「正文被服务端截断成 200 字符预览」也记成 ok ——
+    # 于是 550 章的书导出后只有 10 万字却「零失败」，
+    # 错误被推迟到用户读完才发现。状态必须如实反映拿到的是什么。
     status: str = "ok"
     error: str = ""
     pua_before: int = 0
     pua_after: int = 0
     chars: int = 0
+    # 截断判定所需的两个事实：服务端标记 + 平台申报字数
+    is_locked: bool = False
+    claimed_words: int = 0
+
+    @property
+    def is_truncated(self) -> bool:
+        """是否只拿到预览（内容明显短于平台申报）。"""
+        return self.status == "preview"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -173,6 +272,8 @@ class ChapterContent:
             "pua_before": self.pua_before,
             "pua_after": self.pua_after,
             "chars": self.chars,
+            "is_locked": self.is_locked,
+            "claimed_words": self.claimed_words,
             "text": self.text,
         }
 
@@ -229,14 +330,22 @@ def _looks_blocked(html: str) -> bool:
     return any(m in head for m in markers)
 
 
-def _fetch_html_sync(url: str, timeout: int = DEFAULT_TIMEOUT) -> str:
-    """取一个页面。一次性请求，不含重试（重试在上层）。"""
-    req = urllib.request.Request(url, headers={
+def _fetch_html_sync(url: str, timeout: int = DEFAULT_TIMEOUT,
+                     cookie: str = "") -> str:
+    """取一个页面。一次性请求，不含重试（重试在上层）。
+
+    cookie 非空时按登录态请求。未登录时锁定章只会返回试读片段，
+    页面上写着「会员登录后，可在网页畅读全文」。
+    """
+    headers = {
         "User-Agent": UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "zh-CN,zh;q=0.9",
         "Referer": f"{BASE}/",
-    })
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             # 番茄可能不是 utf-8，但实测是
@@ -477,10 +586,14 @@ def parse_rank_page(html: str) -> tuple[list[dict[str, Any]], int]:
     return items, total
 
 
-def parse_reader_page(html: str) -> tuple[str, str]:
-    """解析阅读页，返回 (标题, 正文HTML)。
+def parse_reader_page(html: str) -> tuple[str, str, dict[str, Any]]:
+    """解析阅读页，返回 (标题, 正文HTML, chapterData 原始字段)。
 
     正文 HTML 仍需解码 —— 见 fanqie_decoder。
+
+    第三个返回值给出 `isChapterLock` / `chapterWordNumber` 等元数据，
+    调用方据此判定「拿到的是全文还是预览」。只看 content 长度会误判：
+    未登录时 locked 章的 content 恒为 200 字符，看起来像是拿到了内容。
     """
     state = _extract_state(html)
     if not state:
@@ -502,7 +615,7 @@ def parse_reader_page(html: str) -> tuple[str, str]:
             raise FanqieError("章节被锁定")
         raise FanqieError("章节正文为空")
 
-    return title, content
+    return title, content, cd
 
 
 # ============================================================
@@ -522,6 +635,7 @@ class FanqieClient:
         max_retries: int = DEFAULT_MAX_RETRIES,
         timeout: int = DEFAULT_TIMEOUT,
         backoff_base: float = DEFAULT_BACKOFF_BASE,
+        cookie: str | None = None,
     ) -> None:
         self.interval = interval
         self.jitter = jitter
@@ -532,6 +646,9 @@ class FanqieClient:
         # 每个客户端（即每个抓取任务）持有独立限速器，
         # 任务之间不共享时钟，互不等待。
         self.limiter = RateLimiter(interval, jitter)
+        # 登录态：显式传入优先，否则读配置。带上它才能取到
+        # 锁定章的全文，否则只有约 200 字符的试读片段。
+        self.cookie = load_login_cookie() if cookie is None else cookie
 
     def _get(self, url: str) -> str:
         """带限速与退避的取页。"""
@@ -541,7 +658,7 @@ class FanqieClient:
             self.limiter.wait()
             self.request_count += 1
             try:
-                html = _fetch_html_sync(url, self.timeout)
+                html = _fetch_html_sync(url, self.timeout, self.cookie)
             except BlockedError:
                 # 风控不重试：继续撞只会更糟
                 raise
@@ -587,11 +704,26 @@ class FanqieClient:
         """取单章正文并解码。
 
         逐章状态判定：
-          - ok           解码后无残留
-          - locked       章节被锁定或需付费
+          - ok           拿到全文（长度与平台申报相符，且无残留私用区）
+          - preview      只拿到试读预览（服务端截断，见下）
+          - locked       章节被锁定或需付费，正文为空
           - unavailable  正文为空或页面结构异常
           - garbled      解码后仍有私用区字符（码表可能过期）
           - failed       网络或其它错误
+
+        ## 为什么必须单独有 preview 这一档
+
+        未登录抓取时，`isChapterLock=true` 的章返回的 content
+        **恒为 200 个字符**（HTML 长度正好 200），是截断预览；
+        页面里同时写着「会员登录后，可在网页畅读全文」。
+
+        早期实现只判断「解码后有没有残留」，于是这批预览章
+        全部落进 ok 分支。实测《惹金枝》550 章「550/550 成功」，
+        导出后却只有 10.9 万字，而平台申报 116 万字 ——
+        正文静悄悄少了 91%，且缺章清单是空的。
+
+        这与「静默填空」是同一类错误：状态必须如实描述拿到的东西。
+        所以这里以「服务端标记」+「实际长度 vs 申报字数」双重判定。
         """
         result = ChapterContent(
             item_id=ref.item_id,
@@ -602,7 +734,7 @@ class FanqieClient:
 
         try:
             html = self._get(f"{BASE}/reader/{ref.item_id}")
-            title, content_html = parse_reader_page(html)
+            title, content_html, meta = parse_reader_page(html)
         except BlockedError:
             # 风控要向上抛，让批次停止
             raise
@@ -631,6 +763,10 @@ class FanqieClient:
         result.pua_after = decoded.unresolved
         result.chars = len(decoded.text)
 
+        # 服务端元数据：判定截断的依据
+        result.is_locked = bool(meta.get("isChapterLock"))
+        result.claimed_words = _to_int(meta.get("chapterWordNumber"))
+
         if decoded.unresolved > 0:
             # 有残留说明表可能过期 —— 标为乱码，不进入后续分析
             result.status = "garbled"
@@ -638,12 +774,33 @@ class FanqieClient:
                 f"解码后仍有 {decoded.unresolved} 个私用区字符，"
                 "码表可能已过期，请核对字体是否更换"
             )
-        elif not decoded.text.strip():
+            return result
+
+        if not decoded.text.strip():
             result.status = "unavailable"
             result.error = "解码后正文为空"
-        else:
-            result.status = "ok"
+            return result
 
+        # ---------- 截断判定 ----------
+        # 判据取「服务端标记」与「长度显著短于申报」的并集：
+        #   - isChapterLock 是服务端自己的说法，最可靠；
+        #   - 长度判据兜住 isChapterLock 未置位但内容仍被裁剪的情况。
+        # 阈值取 0.6：正常章偶有几百字浮动，但不会只剩十分之一。
+        short = (
+            result.claimed_words > 0
+            and result.chars < result.claimed_words * TRUNCATION_RATIO
+        )
+        if result.is_locked or short:
+            result.status = "preview"
+            result.error = (
+                f"服务端只返回试读预览（取得 {result.chars} 字，"
+                f"平台申报 {result.claimed_words} 字）。"
+                "未登录时锁定章恒定截断为 200 字符，"
+                "需登录态才能取得该章全文。"
+            )
+            return result
+
+        result.status = "ok"
         return result
 
 
@@ -673,7 +830,7 @@ class BatchProgress:
     done: int = 0
     ok: int = 0
     failed: int = 0
-    # 逐章状态：ok / locked / unavailable / garbled / failed / skipped
+    # 逐章状态：ok / preview / locked / unavailable / garbled / failed / skipped
     statuses: dict[str, int] = field(default_factory=dict)
     current_title: str = ""
     stopped_reason: str = ""
@@ -803,10 +960,17 @@ def build_missing_report(
 
     这是给用户看的「哪些没拿到、为什么」。
     没有这张表，用户无法判断分析报告覆盖了多少内容。
+
+    **preview 计入缺章。** 只拿到试读预览的章不算成功：
+    它看起来有正文，实际是被截断的片段，混进正文会让
+    「覆盖率」失真（实测 550 章的书会显示 100% 成功，实则只覆盖 1.8%）。
     """
     by_status: dict[str, list[dict[str, Any]]] = {}
     missing: list[dict[str, Any]] = []
     ok_count = 0
+    # 只拿到预览的字数，用来如实汇报「实际可用内容有多少」
+    preview_count = 0
+    preview_chars = 0
 
     for ref in chapters:
         c = results.get(ref.item_id)
@@ -828,11 +992,24 @@ def build_missing_report(
                 "status": c.status,
                 "error": c.error,
                 "chars": c.chars,
+                "claimed_words": c.claimed_words,
             }
             if c.status == "ok":
                 ok_count += 1
+            elif c.status == "preview":
+                preview_count += 1
+                preview_chars += c.chars
+
+        # 相对本章申报字数还差多少，让「缺了多少」可量化
+        if entry.get("claimed_words") and entry.get("chars"):
+            entry["missing_words"] = max(
+                0, entry["claimed_words"] - entry["chars"]
+            )
 
         by_status.setdefault(entry["status"], []).append(entry)
+
+        # preview 与其它非 ok 状态一样计入缺章清单 ——
+        # 它确实没拿到该章全文，只是拿到了开头。
         if entry["status"] != "ok":
             missing.append(entry)
 
@@ -841,6 +1018,9 @@ def build_missing_report(
         "ok": ok_count,
         "missing_count": len(missing),
         "by_status": {k: len(v) for k, v in by_status.items()},
+        # 预览章单独说明，避免「有正文所以算成功」的误读
+        "preview_count": preview_count,
+        "preview_chars": preview_chars,
         # 缺章清单可能很长，界面上分页展示；这里全量返回供落盘
         "missing": missing,
     }
@@ -851,6 +1031,7 @@ def results_to_txt(
     results: dict[str, ChapterContent],
     *,
     include_missing_note: bool = True,
+    include_preview: bool = True,
 ) -> str:
     """把抓取结果拼成 TXT，供现有拆书导入使用。
 
@@ -861,37 +1042,89 @@ def results_to_txt(
 
     缺失的章**不会静默跳过**：会在末尾附一段清单，
     让拆书分析知道覆盖范围。
+
+    ## 预览章（status=preview）
+
+    未登录时，锁定章只能拿到被截断的开头。这些内容有两种处理：
+
+      - `include_preview=True`（默认）：收入正文，但**逐章标注**
+        「本节仅为试读片段」，页首另附总说明与占比。
+        这样文本仍可用于文风研究，又不会被当成完整原文引用。
+      - `include_preview=False`：完全排除，只在末尾清单里列出。
+
+    默认选前者，因为纯文风分析需要样本；但标注必须显式，
+    否则下游会误判「这本已完整取得」。
     """
     parts: list[str] = []
     missing: list[str] = []
+    preview_orders: list[int] = []
+    preview_chars = 0
+    ok_chars = 0
 
     for ref in chapters:
         c = results.get(ref.item_id)
-        if c is None or c.status != "ok" or not c.text.strip():
+        if c is None or not c.text.strip() or c.status in (
+            "unavailable", "garbled", "failed", "locked", "not_fetched"
+        ):
             reason = c.status if c else "not_fetched"
             missing.append(f"第{ref.order}章 {ref.title}（{reason}）")
             continue
 
-        # 标题行：保留卷名便于追溯
+        if c.status == "preview":
+            preview_orders.append(ref.order)
+            preview_chars += c.chars
+            if not include_preview:
+                missing.append(f"第{ref.order}章 {ref.title}（preview：仅试读片段）")
+                continue
+
         header = c.title or ref.title
         parts.append(header)
         parts.append("")
+        if c.status == "preview":
+            # 逐章标注，让片段不可能被误认成完整章
+            parts.append(
+                f"〖本节仅为试读片段〗取得 {c.chars} 字 / "
+                f"平台申报 {c.claimed_words} 字，正文被服务端截断。"
+            )
+            parts.append("")
         parts.append(c.text)
         parts.append("")
 
+        if c.status == "ok":
+            ok_chars += c.chars
+
     body = "\n".join(parts).strip()
 
-    if include_missing_note and missing:
-        note = [
-            "",
-            "=" * 40,
-            f"【抓取说明】共 {len(chapters)} 章，成功 {len(chapters) - len(missing)} 章，",
-            f"未取得 {len(missing)} 章。以下内容未包含在正文中：",
-            "",
-        ]
-        note.extend(missing[:200])
-        if len(missing) > 200:
-            note.append(f"... 另有 {len(missing) - 200} 章未列出")
+    if include_missing_note:
+        note: list[str] = ["", "=" * 40, "【抓取说明】"]
+
+        if preview_orders:
+            total_chars = ok_chars + preview_chars
+            pct = (preview_chars / total_chars * 100) if total_chars else 0.0
+            note.extend([
+                f"本书有 {len(preview_orders)} 章只取得试读片段"
+                f"（占已取正文的 {pct:.1f}%），共 {preview_chars} 字。",
+                "这些章在正文中以〖本节仅为试读片段〗标注，"
+                "不可作为完整原文引用。",
+                f"完整可取正文约 {ok_chars} 字。",
+                "",
+                "未登录抓取时，平台对锁定章只返回约 200 字符的预览，"
+                "并提示「会员登录后，可在网页畅读全文」。"
+                "如需全文，需要提供已登录的登录态。",
+                "",
+            ])
+
+        note.append(
+            f"共 {len(chapters)} 章，完整取得 {len(chapters) - len(missing) - len(preview_orders)} 章，"
+            f"仅试读片段 {len(preview_orders)} 章，未取得 {len(missing)} 章。"
+        )
+        if missing:
+            note.append("以下内容未包含在正文中：")
+            note.append("")
+            note.extend(missing[:200])
+            if len(missing) > 200:
+                note.append(f"... 另有 {len(missing) - 200} 章未列出")
+
         body = body + "\n" + "\n".join(note)
 
     return body
@@ -919,4 +1152,8 @@ __all__ = [
     "fetch_book_async",
     "fetch_chapter_async",
     "DEFAULT_INTERVAL_SECONDS",
+    "TRUNCATION_RATIO",
+    "load_login_cookie",
+    "save_login_cookie",
+    "cookie_status",
 ]

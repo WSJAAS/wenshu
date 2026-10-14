@@ -1068,6 +1068,18 @@ export const sourceApi = {
   /** 模块开关状态。前端据此决定是否显示书源入口。 */
   status: () => api.get<unknown, SourceStatus>('/source/status'),
 
+  /** 登录态概况（不回显 Cookie 全文） */
+  loginState: () => api.get<unknown, SourceLoginState>('/source/login'),
+
+  /**
+   * 设置或清除登录态。
+   *
+   * 未登录时平台对锁定章只返回约 200 字符的试读片段，
+   * 一本 550 章的书只能完整取到前 10 章。
+   */
+  setLogin: (cookie: string) =>
+    api.post<unknown, SourceLoginState>('/source/login', { cookie }),
+
   /** 榜单。保留采集元数据供调用方使用，阅读界面直接展示作品。 */
   rank: (enrich = true, interval = 1.2) =>
     api.get<unknown, SourceRankResponse>(

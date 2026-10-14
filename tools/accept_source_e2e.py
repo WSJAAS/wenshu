@@ -152,10 +152,17 @@ if task_id:
         print()
         print(f"  用时 {el:.1f}s")
         print(f"  最终状态: {final['status']}")
-        print(f"  成功 {final['ok_count']} / {final['total_chapters']}")
+        print(f"  完整取得 {final['ok_count']} / {final['total_chapters']}")
         check("任务完成", final["status"] == "completed", f"status={final['status']}")
-        check("全部成功", final["ok_count"] == final["total_chapters"],
+        # 注意：ok_count 只统计**完整取得**的章。
+        # 选 12 章会跨过第 10 章的免费边界，第 11、12 章只拿到试读片段，
+        # 因此 ok_count 少于 total 是**正确行为**，不是失败。
+        check("完整取得的章数合理（不应超过总数）",
+              final["ok_count"] <= final["total_chapters"],
               f"{final['ok_count']}/{final['total_chapters']}")
+        check("跨过免费边界的章被标为未完整取得（而非谎报成功）",
+              final["ok_count"] < final["total_chapters"],
+              f"ok={final['ok_count']}，说明第 11 章起的截断被正确识别")
         # 限速验证：12 章 × 1.2s ≈ 13.2s 下限
         check("限速实际生效", el >= 12 * 1.2 * 0.85, f"{el:.1f}s >= {12*1.2*0.85:.1f}s")
 
@@ -181,7 +188,14 @@ if task_id:
 
         # 范围应只含选定的 12 章，未选中的不算缺失
         check("统计范围只含选定章", rep["total"] == 12, f"total={rep['total']}")
-        check("无缺失", rep["missing_count"] == 0, f"缺失 {rep['missing_count']}")
+        # 第 11、12 章只拿到试读片段，因此计为缺失是**正确行为**：
+        # 覆盖率必须反映「拿到多少全文」，不能把预览当成功。
+        check("试读片段计入缺章（覆盖率不虚报）",
+              rep["missing_count"] == rep["total"] - rep["ok"],
+              f"缺失 {rep['missing_count']}，完整 {rep['ok']}")
+        check("缺章原因是 preview 而非失败",
+              all(s in ("ok", "preview") for s in rep["by_status"]),
+              f"by_status={rep['by_status']}")
         check("说明了统计范围", "未纳入" in d.get("scope_note", ""))
         check("解码后无残留",
               all(c["pua_after"] == 0 for c in d["chapters"] if c["status"] == "ok"))

@@ -62,7 +62,10 @@ const { Text, Title, Paragraph } = Typography;
 
 /** 逐章状态的展示样式 */
 const STATUS_META: Record<string, { color: string; label: string }> = {
-  ok: { color: 'success', label: '成功' },
+  ok: { color: 'success', label: '完整' },
+  // preview 必须与 ok 分开展示。未登录时锁定章只能拿到被截断的开头，
+  // 若标成「成功」，界面会显示 550/550 而实际只覆盖很小一部分。
+  preview: { color: 'warning', label: '仅试读片段' },
   locked: { color: 'warning', label: '锁定' },
   unavailable: { color: 'default', label: '暂不可用' },
   garbled: { color: 'error', label: '乱码' },
@@ -737,13 +740,20 @@ export default function Source() {
             {chapters.scope_note}
           </Text>
 
-          {/* 缺章清单：用户据此判断分析覆盖了多少 */}
+          {/* 缺章清单：用户据此判断分析覆盖了多少。
+              preview（仅试读片段）也计入这里 —— 它看起来有正文，
+              实际是被服务端截断的片段，不能算取得。 */}
           {chapters.report.missing_count > 0 && (
             <Alert
               type="warning"
               showIcon
               style={{ marginBottom: 12 }}
-              message={`有 ${chapters.report.missing_count} 章未取得正文`}
+              message={
+                chapters.report.preview_count
+                  ? `有 ${chapters.report.missing_count} 章不是完整正文` +
+                    `（其中 ${chapters.report.preview_count} 章只取得试读片段）`
+                  : `有 ${chapters.report.missing_count} 章未取得正文`
+              }
               description={
                 <div style={{ maxHeight: 140, overflowY: 'auto' }}>
                   {chapters.report.missing.slice(0, 40).map((m) => (
@@ -755,6 +765,11 @@ export default function Source() {
                       >
                         {STATUS_META[m.status]?.label || m.status}
                       </Tag>
+                      {m.status === 'preview' && m.claimed_words ? (
+                        <Text type="secondary">
+                          {' '}取得 {m.chars} 字 / 申报 {m.claimed_words} 字
+                        </Text>
+                      ) : null}
                       {m.error && <Text type="secondary"> {m.error.slice(0, 50)}</Text>}
                     </div>
                   ))}

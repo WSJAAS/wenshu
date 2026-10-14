@@ -37,6 +37,7 @@ from app.services.fanqie_source import (
     BatchFetcher, BlockedError, BookInfo, ChapterContent, ChapterRef,
     FanqieClient, FanqieError, build_missing_report, merge_results,
     results_to_txt,
+    cookie_status, save_login_cookie,
 )
 
 router = APIRouter(prefix="/source", tags=["书源"])
@@ -91,6 +92,10 @@ class SourceStatusResponse(BaseModel):
     enabled: bool
     module: str = "书源"
     note: str = ""
+    # 登录态。未登录时锁定章只有试读片段，这个状态必须让界面知道。
+    login_configured: bool = False
+    login_has_session: bool = False
+    login_note: str = ""
 
 
 class BookSearchRequest(BaseModel):
@@ -319,6 +324,7 @@ def _load_catalog(t: SourceTask) -> list[ChapterRef]:
 async def source_status():
     """前端据此决定是否显示书源入口。"""
     enabled = _source_enabled()
+    ck = cookie_status()
     return SourceStatusResponse(
         enabled=enabled,
         note=(
@@ -326,7 +332,46 @@ async def source_status():
             if enabled
             else "书源默认关闭。它依赖外部站点，启用需设置 FANQIE_ENABLED=true"
         ),
+        login_configured=bool(ck.get("configured")),
+        login_has_session=bool(ck.get("has_sessionid")),
+        login_note=ck.get("note", ""),
     )
+
+
+@router.get("/login", summary="查看登录态（不回显 Cookie 全文）")
+async def get_login_state():
+    """登录态概况。
+
+    未登录时，锁定章只能取到约 200 字符的试读片段 —— 这是
+    「抓了 550 章却只有 10 万字」的直接原因。界面必须如实告知。
+    """
+    _require_enabled()
+    return cookie_status()
+
+
+class LoginCookieRequest(BaseModel):
+    cookie: str = Field(default="", description="浏览器里复制的 Cookie 串；空串表示清除")
+
+
+@router.post("/login", summary="设置或清除登录态")
+async def set_login_state(payload: LoginCookieRequest):
+    """保存登录 Cookie。
+
+    取值方法：浏览器登录番茄小说后，按 F12 → Network →
+    任意请求 → Request Headers → 复制 Cookie 整行。
+
+    只做原样转发，不解密、不校验账号。存放位置在数据目录下，
+    不入库、不进 git。
+    """
+    _require_enabled()
+    try:
+        path = save_login_cookie(payload.cookie)
+    except FanqieError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    ck = cookie_status()
+    ck["saved_to"] = path
+    return ck
 
 
 @router.get("/rank", summary="榜单（含覆盖范围说明）")
@@ -560,6 +605,8 @@ async def _run_task(
 
             ok = sum(1 for c in merged.values()
                      if c.status == "ok" and c.item_id in want)
+            preview = sum(1 for c in merged.values()
+                          if c.status == "preview" and c.item_id in want)
             task.done_count = sum(1 for c in merged.values() if c.item_id in want)
             task.ok_count = ok
             task.failed_count = len(targets) - ok
@@ -569,7 +616,15 @@ async def _run_task(
                 task.message = prog.stopped_reason
             else:
                 task.status = "completed"
-                task.message = f"完成：{ok}/{len(targets)} 章"
+                # 预览章单独报出来。只说「完成 N/N 章」会让人以为
+                # 整本到手，而实际可能只覆盖了个位数百分比。
+                if preview:
+                    task.message = (
+                        f"完成：完整 {ok}/{len(targets)} 章，"
+                        f"另 {preview} 章只取得试读片段（未登录，正文被截断）"
+                    )
+                else:
+                    task.message = f"完成：{ok}/{len(targets)} 章"
 
             await db.commit()
             logger.info("取源任务 %s 结束：%s", task_id, task.message)
@@ -821,6 +876,10 @@ async def handoff_to_book_import(
         "book_title": t.book_title,
         "handed_chapters": len([c for c in targets if c.item_id in results
                                 and results[c.item_id].status == "ok"]),
+        # 只拿到试读片段的章数。拆书导入拿到的是残缺正文时，
+        # 需要知道有多少内容是截断的。
+        "preview_chapters": len([c for c in targets if c.item_id in results
+                                 and results[c.item_id].status == "preview"]),
         "txt_chars": len(txt),
         "book_import_task": task.model_dump() if hasattr(task, "model_dump") else task,
         "note": "已交给拆书导入。后续在该任务的预览里确认并导入。",
