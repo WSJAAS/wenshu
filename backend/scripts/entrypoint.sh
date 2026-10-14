@@ -31,8 +31,8 @@ echo "================================================"
 # 数据库配置（从环境变量读取）
 DB_HOST="${DB_HOST:-postgres}"
 DB_PORT="${DB_PORT:-5432}"
-DB_USER="${POSTGRES_USER:-mumuai}"
-DB_NAME="${POSTGRES_DB:-mumuai_novel}"
+DB_USER="${POSTGRES_USER:-wenshu}"
+DB_NAME="${POSTGRES_DB:-wenshu}"
 
 # 等待数据库就绪
 echo "⏳ 等待数据库启动..."

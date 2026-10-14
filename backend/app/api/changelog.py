@@ -19,10 +19,10 @@ def require_login(request: Request):
         raise HTTPException(status_code=401, detail="需要登录")
     return request.state.user
 
-# GitHub API配置
+# GitHub API配置（本工程仓库）
 GITHUB_API_BASE = "https://api.github.com"
-REPO_OWNER = "xiamuceer-j"
-REPO_NAME = "MuMuAINovel"
+REPO_OWNER = "WSJAAS"
+REPO_NAME = "wenshu"
 
 # 缓存配置
 _cache = {
@@ -81,14 +81,13 @@ async def fetch_github_commits(page: int = 1, per_page: int = 30) -> List[dict]:
     """从GitHub API获取提交历史"""
     url = f"{GITHUB_API_BASE}/repos/{REPO_OWNER}/{REPO_NAME}/commits"
     params = {
-        "author": REPO_OWNER,
         "page": page,
         "per_page": per_page
     }
     
     headers = {
         "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "MuMuAINovel-App"
+        "User-Agent": "Wenshu-App"
     }
     
     try:

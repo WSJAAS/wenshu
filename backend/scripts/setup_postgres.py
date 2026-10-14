@@ -56,8 +56,8 @@ class PostgreSQLSetup:
         port: int = 5432,
         admin_user: str = "postgres",
         admin_password: str = None,
-        db_name: str = "mumuai_novel",
-        db_user: str = "mumuai",
+        db_name: str = "wenshu",
+        db_user: str = "wenshu",
         db_password: str = "123456"
     ):
         """
@@ -374,9 +374,9 @@ async def main():
     admin_password = getpass(f"管理员密码: ")
     
     print("\n请输入要创建的数据库信息:\n")
-    db_name = input("数据库名 [mumuai_novel]: ").strip() or "mumuai_novel"
-    db_user = input("数据库用户名 [mumuai]: ").strip() or "mumuai"
-    db_password = getpass("数据库用户密码 [mumuai123]: ") or "mumuai123"
+    db_name = input("数据库名 [wenshu]: ").strip() or "wenshu"
+    db_user = input("数据库用户名 [wenshu]: ").strip() or "wenshu"
+    db_password = getpass("数据库用户密码 [wenshu123]: ") or "wenshu123"
     
     print(f"\n{'='*60}")
     print(f"配置摘要:")

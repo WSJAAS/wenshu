@@ -1,10 +1,10 @@
 services:
   postgres:
     image: postgres:18-alpine
-    container_name: mumuainovel-postgres
+    container_name: wenshu-postgres
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-mumuai_novel}
-      POSTGRES_USER: ${POSTGRES_USER:-mumuai}
+      POSTGRES_DB: ${POSTGRES_DB:-wenshu}
+      POSTGRES_USER: ${POSTGRES_USER:-wenshu}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
       TZ: ${TZ:-Asia/Shanghai}
@@ -15,7 +15,7 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mumuai} -d ${POSTGRES_DB:-mumuai_novel}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-wenshu} -d ${POSTGRES_DB:-wenshu}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -49,12 +49,12 @@ services:
       - -c
       - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-4GB}
 
-  mumuainovel:
+  wenshu:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mumujie/mumuainovel:latest
-    container_name: mumuainovel
+    image: wenshu/wenshu:latest
+    container_name: wenshu
     depends_on:
       postgres:
         condition: service_healthy
@@ -76,7 +76,7 @@ services:
       - DEBUG=${DEBUG:-false}
       
       # 数据库配置
-      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-mumuai}:${POSTGRES_PASSWORD:-123456}@postgres:5432/${POSTGRES_DB:-mumuai_novel}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-wenshu}:${POSTGRES_PASSWORD:-123456}@postgres:5432/${POSTGRES_DB:-wenshu}
       
       # 数据库连接信息（用于 entrypoint.sh）
       - DB_HOST=postgres

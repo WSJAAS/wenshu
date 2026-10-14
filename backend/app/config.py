@@ -71,7 +71,7 @@ config_logger = logging.getLogger(__name__)
 
 # 数据库配置：PostgreSQL
 # 从环境变量获取数据库URL
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://mumuai:password@localhost:5432/mumuai_novel")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://wenshu:password@localhost:5432/wenshu")
 
 config_logger.debug(f"数据库类型: PostgreSQL")
 config_logger.debug(f"数据库URL: {DATABASE_URL}")
@@ -184,7 +184,7 @@ class Settings(BaseSettings):
     SMTP_USE_TLS: bool = False
     SMTP_USE_SSL: bool = True
     SMTP_FROM_EMAIL: Optional[str] = None
-    SMTP_FROM_NAME: str = "MuMuAINovel"
+    SMTP_FROM_NAME: str = "文枢"
     EMAIL_AUTH_ENABLED: bool = True
     EMAIL_REGISTER_ENABLED: bool = True
     EMAIL_VERIFICATION_CODE_TTL_MINUTES: int = 10

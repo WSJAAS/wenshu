@@ -800,7 +800,7 @@ export default function SystemSettingsPage() {
                 <Button size="small" onClick={() => appendMarkdownSnippet('- 列表项\n- 列表项')}>列表</Button>
                 <Button size="small" onClick={() => appendMarkdownSnippet('> 引用说明')}>引用</Button>
                 <Button size="small" onClick={() => appendMarkdownSnippet('[链接文字](https://example.com)')}>链接</Button>
-                <Button size="small" onClick={() => appendMarkdownSnippet('<p align="center">\n  <img src="https://avatars.githubusercontent.com/u/283105808?s=48&v=4" alt="DolOffer Logo" width="200"/>\n  <br>\n  <em>专注于优质数字产品推荐与超值优惠分享的领先平台</em>\n</p>')}>居中图片</Button>
+                <Button size="small" onClick={() => appendMarkdownSnippet('<p align="center">\n  <img src="/logo.svg" alt="项目 Logo" width="120"/>\n  <br>\n  <em>公告副标题文字</em>\n</p>')}>居中图片</Button>
                 <Button size="small" onClick={() => appendMarkdownSnippet('```\n代码内容\n```')}>代码块</Button>
               </Space>
 
@@ -826,9 +826,9 @@ export default function SystemSettingsPage() {
                         '[查看详情](https://example.com)',
                         '',
                         '<p align="center">',
-                        '  <img src="https://avatars.githubusercontent.com/u/283105808?s=48&v=4" alt="DolOffer Logo" width="200"/>',
+                        '  <img src="/logo.svg" alt="项目 Logo" width="120"/>',
                         '  <br>',
-                        '  <em>专注于优质数字产品推荐与超值优惠分享的领先平台</em>',
+                        '  <em>公告副标题文字</em>',
                         '</p>',
                       ].join('\n')}
                     />

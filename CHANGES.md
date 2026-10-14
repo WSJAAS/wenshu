@@ -260,6 +260,34 @@
 **影响**：提示词工坊的云端共享功能默认关闭。
 如需使用，在 `backend/.env` 中设置 `WORKSHOP_CLOUD_URL` 指向自建服务端。
 
+### 6.7 清除其余上游品牌残留
+
+**改动文件**：
+
+- `backend/app/api/auth.py`、`backend/app/api/settings.py`
+- `backend/app/api/changelog.py`
+- `backend/app/services/project_agent_service.py`
+- `backend/app/services/onnx_embedding.py`
+- `backend/app/config.py`、`backend/app/models/settings.py`、`backend/app/schemas/settings.py`
+- `backend/app/security.py`
+- `frontend/src/pages/SystemSettings.tsx`
+- `docker-compose.yml`、`backend/scripts/*`
+- 前端若干 `.tsx` / `.ts`
+
+**改动**：
+
+1. 邮件模板（注册／登录／重置密码／SMTP 测试）与发件人名称
+   由上游品牌改为「文枢」。
+2. 更新日志 API 数据源由上游仓库改为本工程仓库。
+3. 创作助手的系统提示词与界面文案去掉上游品牌名。
+4. ONNX 模型缓存目录与下载 UA 改为 `Wenshu`。
+5. 容器名、镜像名、数据库名／用户名默认值、会话密钥默认值改为自有命名。
+6. 公告编辑器中的第三方推广图与文案（作为默认模板）替换为本地占位内容。
+
+**保留**：`README.md`、`CHANGES.md`、`THIRD_PARTY.md` 与
+`frontend/src/config/version.ts` 中的上游项目名与仓库地址，
+其性质为 AGPL 要求的来源署名。
+
 ---
 
 ## 七、恢复办法

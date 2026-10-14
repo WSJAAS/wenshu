@@ -1570,7 +1570,7 @@ export const projectAgentApi = {
       }
       throw new Error(detail);
     }
-    if (!response.body) throw new Error('无法读取木木创作助手响应流');
+    if (!response.body) throw new Error('无法读取创作助手响应流');
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -1596,8 +1596,8 @@ export const projectAgentApi = {
         else if (event.type === 'final_done') callbacks.onFinalDone?.(event.data);
         else if (event.type === 'result') callbacks.onResult?.(event.data);
         else if (event.type === 'error') {
-          callbacks.onError?.(event.error || '木木创作助手执行失败');
-          throw new Error(event.error || '木木创作助手执行失败');
+          callbacks.onError?.(event.error || '创作助手执行失败');
+          throw new Error(event.error || '创作助手执行失败');
         }
       }
     }
