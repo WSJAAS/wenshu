@@ -1,0 +1,754 @@
+"""书源 API —— 榜单、详情、取源任务。
+
+## 定位
+
+**可关闭的可选模块。** 依赖外部站点（番茄小说），随时可能失效。
+通过配置 `FANQIE_ENABLED` 开关，默认关闭；关闭时所有接口返回 403。
+
+## 与拆书导入的关系
+
+书源负责「拿到原文 TXT」，拆书导入负责「把 TXT 变成项目」。
+两者通过 `results_to_txt()` 衔接，拆书管线不改。
+
+## 任务持久化
+
+取源任务**不放在内存里**。整本可能几百章、跑十几分钟，
+进程重启就丢会非常糟。任务状态落在 `source_tasks` 表，
+重启后可以继续。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+from datetime import datetime
+from typing import Any, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
+from sqlalchemy import Column, DateTime, Integer, String, Text, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.database import Base, get_db
+from app.logger import get_logger
+from app.services.fanqie_source import (
+    BatchFetcher, BlockedError, BookInfo, ChapterContent, ChapterRef,
+    FanqieClient, FanqieError, build_missing_report, merge_results,
+    results_to_txt,
+)
+
+router = APIRouter(prefix="/source", tags=["书源"])
+logger = get_logger(__name__)
+
+
+# ============================================================
+#  持久化模型
+# ============================================================
+class SourceTask(Base):
+    """取源任务。持久化，重启后可继续。"""
+
+    __tablename__ = "source_tasks"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(100), nullable=False, index=True)
+    book_id = Column(String(32), nullable=False, index=True)
+
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    # pending / running / paused / completed / failed / cancelled
+    message = Column(String(500), default="")
+    error = Column(Text, default="")
+
+    # 书籍元信息与目录（JSON）
+    book_title = Column(String(300), default="")
+    book_author = Column(String(200), default="")
+    total_chapters = Column(Integer, default=0)
+
+    # 抓取范围与进度
+    requested_ranges = Column(Text, default="")     # 用户选的范围说明
+    done_count = Column(Integer, default=0)
+    ok_count = Column(Integer, default=0)
+    failed_count = Column(Integer, default=0)
+
+    # 逐章结果：{item_id: ChapterContent dict}
+    chapters_json = Column(Text, default="{}")
+    # 目录快照
+    catalog_json = Column(Text, default="[]")
+    # 书籍信息快照
+    book_json = Column(Text, default="{}")
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ============================================================
+#  请求 / 响应
+# ============================================================
+class SourceStatusResponse(BaseModel):
+    enabled: bool
+    module: str = "书源"
+    note: str = ""
+
+
+class BookSearchRequest(BaseModel):
+    book_id: str = Field(..., description="书籍 ID 或番茄链接")
+
+
+class ChapterSelection(BaseModel):
+    """选章范围。三选一，优先级：item_ids > range > preset。"""
+
+    preset: str = Field(default="first", description="first=开篇若干章 / volume=指定卷 / all=整本")
+    count: int = Field(default=10, ge=1, le=200, description="preset=first 时取多少章")
+    volume: str = Field(default="", description="preset=volume 时的卷名")
+    item_ids: list[str] = Field(default_factory=list, description="preset=ids 时直接指定")
+
+
+class CreateSourceTaskRequest(BaseModel):
+    book_id: str
+    selection: ChapterSelection = Field(default_factory=ChapterSelection)
+    # 保守默认值。实测单章 0.2~0.4s，但连续整本的风控代价未知，
+    # 因此不按实测速度设默认。
+    interval: float = Field(default=1.2, ge=0.2, le=10.0, description="请求间隔（秒）")
+    max_chapters: int | None = Field(default=None, ge=1, le=3000, description="本次最多抓多少章")
+
+
+class TaskSummary(BaseModel):
+    task_id: str
+    status: str
+    message: str = ""
+    error: str = ""
+    book_id: str = ""
+    book_title: str = ""
+    total_chapters: int = 0
+    done_count: int = 0
+    ok_count: int = 0
+    failed_count: int = 0
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+# ============================================================
+#  内部：任务与客户端
+# ============================================================
+def _source_enabled() -> bool:
+    """书源是否启用。默认关闭 —— 依赖外部站点，让它显式开启。"""
+    return bool(getattr(settings, "FANQIE_ENABLED", False))
+
+
+def _require_enabled() -> None:
+    if not _source_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="书源模块已关闭。启用请设置环境变量 FANQIE_ENABLED=true",
+        )
+
+
+def _normalize_book_id(raw: str) -> str:
+    """从链接或纯 ID 中取出 bookId。"""
+    s = (raw or "").strip()
+    if not s:
+        raise HTTPException(status_code=400, detail="书籍 ID 为空")
+    # 链接形式：https://fanqienovel.com/page/<id>
+    if "/" in s:
+        parts = [p for p in s.split("/") if p]
+        for i, p in enumerate(parts):
+            if p in ("page", "reader") and i + 1 < len(parts):
+                s = parts[i + 1]
+                break
+        else:
+            s = parts[-1]
+    s = s.split("?")[0].strip()
+    if not s.isdigit():
+        raise HTTPException(status_code=400, detail=f"无法识别的书籍 ID: {raw}")
+    return s
+
+
+def _select_chapters(all_ch: list[ChapterRef], sel: ChapterSelection) -> list[ChapterRef]:
+    """按用户选择筛出要抓的章节。"""
+    if sel.item_ids:
+        want = set(sel.item_ids)
+        picked = [c for c in all_ch if c.item_id in want]
+        if not picked:
+            raise HTTPException(status_code=400, detail="指定的章节 ID 都不在目录里")
+        return picked
+
+    if sel.preset == "all":
+        return list(all_ch)
+
+    if sel.preset == "volume":
+        if not sel.volume:
+            raise HTTPException(status_code=400, detail="preset=volume 时必须指定卷名")
+        picked = [c for c in all_ch if c.volume == sel.volume]
+        if not picked:
+            vols = sorted({c.volume for c in all_ch})
+            raise HTTPException(
+                status_code=400,
+                detail=f"卷名不存在: {sel.volume}。可用卷: {', '.join(vols)}",
+            )
+        return picked
+
+    # 默认：开篇若干章
+    return all_ch[: sel.count]
+
+
+def _task_to_summary(t: SourceTask) -> TaskSummary:
+    return TaskSummary(
+        task_id=t.id,
+        status=t.status,
+        message=t.message or "",
+        error=t.error or "",
+        book_id=t.book_id,
+        book_title=t.book_title or "",
+        total_chapters=t.total_chapters or 0,
+        done_count=t.done_count or 0,
+        ok_count=t.ok_count or 0,
+        failed_count=t.failed_count or 0,
+        created_at=t.created_at,
+        updated_at=t.updated_at,
+    )
+
+
+def _load_chapters(t: SourceTask) -> dict[str, ChapterContent]:
+    try:
+        raw = json.loads(t.chapters_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+    out: dict[str, ChapterContent] = {}
+    for k, v in raw.items():
+        if isinstance(v, dict):
+            out[k] = ChapterContent(**{
+                f: v.get(f) for f in (
+                    "item_id", "title", "text", "volume", "order",
+                    "status", "error", "pua_before", "pua_after", "chars",
+                ) if f in v
+            } | {"item_id": v.get("item_id", k)})
+    return out
+
+
+def _save_chapters(t: SourceTask, results: dict[str, ChapterContent]) -> None:
+    t.chapters_json = json.dumps(
+        {k: v.to_dict() for k, v in results.items()}, ensure_ascii=False
+    )
+
+
+def _load_catalog(t: SourceTask) -> list[ChapterRef]:
+    try:
+        raw = json.loads(t.catalog_json or "[]")
+    except json.JSONDecodeError:
+        return []
+    return [ChapterRef(**c) for c in raw if isinstance(c, dict)]
+
+
+# ============================================================
+#  接口
+# ============================================================
+@router.get("/status", response_model=SourceStatusResponse, summary="书源模块状态")
+async def source_status():
+    """前端据此决定是否显示书源入口。"""
+    enabled = _source_enabled()
+    return SourceStatusResponse(
+        enabled=enabled,
+        note=(
+            "书源已启用。内容来自番茄小说公开页面，仅作本地研读。"
+            if enabled
+            else "书源默认关闭。它依赖外部站点，启用需设置 FANQIE_ENABLED=true"
+        ),
+    )
+
+
+@router.get("/rank", summary="榜单（含覆盖范围说明）")
+async def get_rank(
+    interval: float = Query(default=1.2, ge=0.2, le=10.0),
+    enrich: bool = Query(default=True, description="是否补取详情页拿干净书名"),
+):
+    """取榜单首屏。
+
+    **返回里明确标注覆盖范围**：首屏通常只有 10 本，而平台声明 100 本。
+    绝不把部分当全部。
+    """
+    _require_enabled()
+    client = FanqieClient(interval=interval)
+
+    try:
+        items, declared_total = await asyncio.to_thread(client.fetch_rank)
+    except BlockedError as e:
+        raise HTTPException(status_code=429, detail=f"被风控拦截：{e}")
+    except FanqieError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # 榜单页书名可能带混淆，补取详情页拿干净的
+    if enrich:
+        for it in items:
+            if not it.get("book_id"):
+                continue
+            try:
+                book, _ = await asyncio.to_thread(client.fetch_book, it["book_id"])
+            except Exception as e:
+                # 单本补取失败不影响整体。此时书名只能用榜单页的（可能带混淆），
+                # 明确标记出来，避免把乱码当正常书名展示。
+                it["enriched"] = False
+                it["enrich_error"] = str(e)[:120]
+                fallback = it.get("title_decoded") or it.get("title_raw") or ""
+                it["title"] = fallback
+                it["title_may_be_garbled"] = any(
+                    0xE000 <= ord(c) <= 0xF8FF for c in fallback
+                )
+                continue
+
+            it["enriched"] = True
+            it["title"] = book.title or it.get("title_decoded") or it.get("title_raw") or ""
+            it["title_may_be_garbled"] = False
+            it["author"] = book.author or it.get("author", "")
+            it["category"] = book.category
+            it["tags"] = book.tags
+            it["status"] = book.status
+            # 详情页的读数更可靠；榜单读数可能是 0（字段缺失）
+            it["read_count"] = book.read_count or it.get("read_count", 0)
+            it["word_count"] = book.word_count or it.get("word_count", 0)
+            it["cover_url"] = book.cover_url or it.get("cover_url", "")
+            it["abstract"] = book.abstract or it.get("abstract", "")
+            it["last_chapter_title"] = book.last_chapter_title
+
+    enriched_count = sum(1 for it in items if it.get("enriched"))
+    garbled_count = sum(1 for it in items if it.get("title_may_be_garbled"))
+    failed_count = sum(1 for it in items if it.get("enriched") is False)
+
+    return {
+        "items": items,
+        "fetched": len(items),
+        "declared_total": declared_total,
+        "enriched": enriched_count,
+        "enrich_failed": failed_count,
+        "garbled_titles": garbled_count,
+        # 如实说明覆盖范围
+        "coverage_note": (
+            f"已取得 {len(items)} 本"
+            + (f"，平台声明 {declared_total} 本" if declared_total else "")
+            + ("。榜单首屏只返回部分条目，未分页取全时不应视为完整榜单。"
+               if declared_total and len(items) < declared_total else "")
+            + (f" 另有 {failed_count} 本详情补取失败，书名可能不准确。"
+               if failed_count else "")
+        ),
+        "is_complete": bool(declared_total) and len(items) >= declared_total,
+        "platform_note": "榜单按日更新，反映前一日数据，不是实时热度。",
+    }
+
+
+@router.get("/book/{book_id}", summary="书籍详情与目录")
+async def get_book(
+    book_id: str,
+    interval: float = Query(default=1.2, ge=0.2, le=10.0),
+):
+    """取书籍详情与完整章节目录。"""
+    _require_enabled()
+    bid = _normalize_book_id(book_id)
+    client = FanqieClient(interval=interval)
+
+    try:
+        book, chapters = await asyncio.to_thread(client.fetch_book, bid)
+    except BlockedError as e:
+        raise HTTPException(status_code=429, detail=f"被风控拦截：{e}")
+    except FanqieError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    vols: dict[str, int] = {}
+    for c in chapters:
+        vols[c.volume or "(无卷名)"] = vols.get(c.volume or "(无卷名)", 0) + 1
+
+    locked_ref = sum(1 for c in chapters if c.is_locked)
+    return {
+        "book": book.to_dict(),
+        "chapters": [c.to_dict() for c in chapters],
+        "volumes": [{"name": k, "count": v} for k, v in vols.items()],
+        # 说明锁定字段的含义，避免前端误用
+        "lock_field_note": (
+            f"目录里 {locked_ref} 章带 isChapterLock 标记。"
+            "实测该标记表示「不在免费试读段」，**不代表不可读**。"
+            "真实可读性以实际抓取结果为准。"
+        ),
+    }
+
+
+@router.post("/tasks", response_model=TaskSummary, summary="创建取源任务")
+async def create_source_task(
+    payload: CreateSourceTaskRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """创建并启动取源任务。
+
+    任务**持久化**在数据库里，重启后可以继续。
+    已有的章节结果不会被重复抓取（断点续跑）。
+    """
+    _require_enabled()
+    user_id = getattr(request.state, "user_id", None) or "local"
+
+    bid = _normalize_book_id(payload.book_id)
+
+    # 先取目录
+    client = FanqieClient(interval=payload.interval)
+    try:
+        book, chapters = await asyncio.to_thread(client.fetch_book, bid)
+    except BlockedError as e:
+        raise HTTPException(status_code=429, detail=f"被风控拦截：{e}")
+    except FanqieError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    picked = _select_chapters(chapters, payload.selection)
+
+    task = SourceTask(
+        user_id=user_id,
+        book_id=bid,
+        status="pending",
+        message=f"已选 {len(picked)} 章",
+        book_title=book.title,
+        book_author=book.author,
+        total_chapters=len(picked),
+        requested_ranges=json.dumps(payload.selection.model_dump(), ensure_ascii=False),
+        book_json=json.dumps(book.to_dict(), ensure_ascii=False),
+        catalog_json=json.dumps([c.to_dict() for c in chapters], ensure_ascii=False),
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+
+    # 后台启动抓取
+    asyncio.create_task(_run_task(
+        task.id,
+        selected_ids=[c.item_id for c in picked],
+        interval=payload.interval,
+        max_chapters=payload.max_chapters,
+    ))
+
+    return _task_to_summary(task)
+
+
+async def _run_task(
+    task_id: str,
+    selected_ids: list[str],
+    interval: float,
+    max_chapters: int | None,
+) -> None:
+    """后台执行取源。
+
+    单独开一个会话，避免与请求生命周期耦合。
+    """
+    from app.database import get_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession as AS
+
+    engine = await get_engine("system")
+    maker = async_sessionmaker(engine, class_=AS, expire_on_commit=False)
+
+    try:
+        async with maker() as db:
+            task = await db.get(SourceTask, task_id)
+            if task is None:
+                return
+
+            catalog = _load_catalog(task)
+            want = set(selected_ids)
+            targets = [c for c in catalog if c.item_id in want]
+
+            already = _load_chapters(task)
+
+            task.status = "running"
+            task.message = f"开始抓取 {len(targets)} 章"
+            await db.commit()
+
+            client = FanqieClient(interval=interval)
+            fetcher = BatchFetcher(client)
+
+            # 逐章回调写库，保证中途重启也有进度
+            last_flush = [0]
+
+            def on_progress(prog, content):
+                last_flush[0] += 1
+                # 每 5 章落一次库，避免频繁写
+                if last_flush[0] % 5 == 0 or prog.done == prog.total:
+                    pending.append((content, dict(prog.to_dict())))
+                else:
+                    pending.append((content, None))
+
+            pending: list[tuple[ChapterContent, dict | None]] = []
+
+            # 抓取放在线程里跑（同步客户端）
+            def work():
+                return fetcher.fetch_range(
+                    targets,
+                    already=already,
+                    on_progress=on_progress,
+                    max_chapters=max_chapters,
+                )
+
+            fresh, prog = await asyncio.to_thread(work)
+
+            merged = merge_results(already, fresh)
+            _save_chapters(task, merged)
+
+            ok = sum(1 for c in merged.values()
+                     if c.status == "ok" and c.item_id in want)
+            task.done_count = sum(1 for c in merged.values() if c.item_id in want)
+            task.ok_count = ok
+            task.failed_count = len(targets) - ok
+
+            if prog.stopped_reason:
+                task.status = "paused" if "风控" in prog.stopped_reason else "cancelled"
+                task.message = prog.stopped_reason
+            else:
+                task.status = "completed"
+                task.message = f"完成：{ok}/{len(targets)} 章"
+
+            await db.commit()
+            logger.info("取源任务 %s 结束：%s", task_id, task.message)
+
+    except Exception as e:
+        logger.error("取源任务 %s 异常: %s", task_id, e)
+        try:
+            async with maker() as db:
+                t = await db.get(SourceTask, task_id)
+                if t:
+                    t.status = "failed"
+                    t.error = f"{type(e).__name__}: {e}"
+                    await db.commit()
+        except Exception:
+            pass
+
+
+@router.get("/tasks", response_model=list[TaskSummary], summary="取源任务列表")
+async def list_source_tasks(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(default=30, ge=1, le=200),
+):
+    _require_enabled()
+    user_id = getattr(request.state, "user_id", None) or "local"
+    rows = (await db.execute(
+        select(SourceTask)
+        .where(SourceTask.user_id == user_id)
+        .order_by(SourceTask.created_at.desc())
+        .limit(limit)
+    )).scalars().all()
+    return [_task_to_summary(t) for t in rows]
+
+
+@router.get("/tasks/{task_id}", response_model=TaskSummary, summary="取源任务状态")
+async def get_source_task(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    _require_enabled()
+    t = await db.get(SourceTask, task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return _task_to_summary(t)
+
+
+def _resolve_targets(t: SourceTask) -> list[ChapterRef]:
+    """按任务记录的选章范围，从目录里解析出「本任务真正要抓的章」。
+
+    这一步很重要：只有拿准范围，才能正确区分
+    「没抓到的缺失」与「本来就没选的」——
+    否则会出现「只选 12 章却报 325 章缺失」这种误导。
+    """
+    catalog = _load_catalog(t)
+    try:
+        sel = json.loads(t.requested_ranges or "{}")
+    except json.JSONDecodeError:
+        sel = {}
+
+    item_ids = sel.get("item_ids") or []
+    if item_ids:
+        want = set(item_ids)
+        return [c for c in catalog if c.item_id in want]
+
+    preset = sel.get("preset") or "first"
+    if preset == "all":
+        return list(catalog)
+    if preset == "volume":
+        vol = sel.get("volume") or ""
+        return [c for c in catalog if c.volume == vol]
+
+    # preset == first：取开篇若干章
+    try:
+        count = int(sel.get("count") or 10)
+    except (TypeError, ValueError):
+        count = 10
+    return catalog[:count]
+
+
+@router.get("/tasks/{task_id}/chapters", summary="任务的分章结果与缺章清单")
+async def get_source_task_chapters(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    include_text: bool = Query(default=False, description="是否包含正文（可能很大）"),
+):
+    """分章状态与缺章清单。
+
+    缺章清单是给用户看的「哪些没拿到、为什么」——
+    没有它，用户无法判断后续分析覆盖了多少内容。
+
+    **统计范围只含本任务选定的章**，未选中的不算缺失。
+    """
+    _require_enabled()
+    t = await db.get(SourceTask, task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    targets = _resolve_targets(t)
+    results = _load_chapters(t)
+    report = build_missing_report(targets, results)
+
+    chapters = []
+    for ref in targets:
+        c = results.get(ref.item_id)
+        if c is None:
+            chapters.append({
+                "order": ref.order,
+                "item_id": ref.item_id,
+                "title": ref.title,
+                "volume": ref.volume,
+                "status": "not_fetched",
+                "error": "尚未抓取",
+                "chars": 0,
+                "pua_before": 0,
+                "pua_after": 0,
+            })
+            continue
+        entry = {
+            "order": ref.order,
+            "item_id": ref.item_id,
+            "title": c.title or ref.title,
+            "volume": c.volume or ref.volume,
+            "status": c.status,
+            "error": c.error,
+            "chars": c.chars,
+            "pua_before": c.pua_before,
+            "pua_after": c.pua_after,
+        }
+        if include_text:
+            entry["text"] = c.text
+        chapters.append(entry)
+
+    return {
+        "task": _task_to_summary(t).model_dump(),
+        "chapters": chapters,
+        "report": report,
+        "scope_note": (
+            f"统计范围为本任务选定的 {len(targets)} 章；"
+            f"该书目录共 {len(_load_catalog(t))} 章，其余章节未纳入本次任务。"
+        ),
+    }
+
+
+@router.get("/tasks/{task_id}/txt", summary="导出为 TXT（可直接喂给拆书导入）")
+async def export_source_txt(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """把抓取结果拼成 TXT 文本。
+
+    保留章节顺序与段落结构；缺失章节在末尾附说明，
+    让后续的拆书分析知道覆盖范围。
+    """
+    _require_enabled()
+    t = await db.get(SourceTask, task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    catalog = _load_catalog(t)
+    results = _load_chapters(t)
+    targets = _resolve_targets(t)
+
+    txt = results_to_txt(targets, results)
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(
+        content=txt,
+        media_type="text/plain; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="source_{t.book_id}.txt"'
+            )
+        },
+    )
+
+
+@router.post("/tasks/{task_id}/cancel", summary="取消取源任务")
+async def cancel_source_task(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    t = await db.get(SourceTask, task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if t.status in ("completed", "cancelled", "failed"):
+        return _task_to_summary(t)
+    t.status = "cancelled"
+    t.message = "用户取消"
+    await db.commit()
+    await db.refresh(t)
+    return _task_to_summary(t)
+
+
+# ============================================================
+#  与拆书导入衔接
+# ============================================================
+@router.post("/tasks/{task_id}/to-book-import", summary="把取源结果交给拆书导入")
+async def handoff_to_book_import(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    extract_mode: str = Query(default="full", description="解析范围，在线取源已选定内容，固定用 full"),
+):
+    """把抓取到的原文直接交给现有拆书导入管线。
+
+    这是书源与拆书之间的衔接点：书源负责拿到干净 TXT，
+    拆书负责把它变成项目（生成设定、人物、大纲）。
+    """
+    _require_enabled()
+    t = await db.get(SourceTask, task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    ok_count = t.ok_count or 0
+    if ok_count == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="该任务没有可用正文，无法导入。请先确认抓取结果。",
+        )
+
+    catalog = _load_catalog(t)
+    results = _load_chapters(t)
+    targets = _resolve_targets(t)
+
+    txt = results_to_txt(targets, results)
+    if not txt.strip():
+        raise HTTPException(status_code=400, detail="拼接出的文本为空")
+
+    user_id = getattr(request.state, "user_id", None) or "local"
+
+    from app.services.book_import_service import book_import_service
+    task = await book_import_service.create_task(
+        user_id=user_id,
+        filename=f"{t.book_title or t.book_id}.txt",
+        file_content=txt.encode("utf-8"),
+        project_id=None,
+        create_new_project=True,
+        import_mode="append",
+        # 在线取源已经选好范围，这里按整本处理
+        extract_mode="full",
+        tail_chapter_count=10,
+    )
+
+    return {
+        "ok": True,
+        "book_title": t.book_title,
+        "handed_chapters": len([c for c in targets if c.item_id in results
+                                and results[c.item_id].status == "ok"]),
+        "txt_chars": len(txt),
+        "book_import_task": task.model_dump() if hasattr(task, "model_dump") else task,
+        "note": "已交给拆书导入。后续在该任务的预览里确认并导入。",
+    }

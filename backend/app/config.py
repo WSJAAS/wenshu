@@ -194,6 +194,21 @@ class Settings(BaseSettings):
     WORKSHOP_MODE: str = "client"  # client: 本地部署实例, server: 云端中央服务器
     WORKSHOP_CLOUD_URL: str = "https://mumuverse.space:1566"  # 云端服务地址
     WORKSHOP_API_TIMEOUT: int = 30  # 云端API请求超时时间（秒）
+
+    # ============================================================
+    #  书源模块（可选）
+    #
+    #  默认关闭。它依赖外部站点（番茄小说），随时可能因对方改版失效，
+    #  因此与核心的本地拆书能力隔离：关闭时不影响其它功能。
+    #
+    #  启用：在 .env 设 FANQIE_ENABLED=true
+    # ============================================================
+    FANQIE_ENABLED: bool = False
+    # 抓取间隔（秒）。实测单章 0.2~0.4s，但连续整本的风控代价未知，
+    # 所以默认值偏保守，不按实测速度设。
+    FANQIE_INTERVAL: float = 1.2
+    # 单次任务最多抓多少章，防止误操作拉起整本
+    FANQIE_MAX_CHAPTERS_PER_TASK: int = 3000
     
     class Config:
         env_file = ".env"

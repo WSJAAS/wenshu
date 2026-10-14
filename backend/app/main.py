@@ -71,6 +71,27 @@ async def lifespan(app: FastAPI):
             await conn.run_sync(
                 lambda sync_conn: BackgroundTask.__table__.create(sync_conn, checkfirst=True)
             )
+
+            # 书源任务表：取源过程可能跑十几分钟，必须持久化，
+            # 因此独立建表并在重启后把中断的任务标为暂停（可继续），
+            # 而不是像后台任务那样标为失败。
+            try:
+                from app.api.source import SourceTask
+                await conn.run_sync(
+                    lambda sync_conn: SourceTask.__table__.create(sync_conn, checkfirst=True)
+                )
+                await conn.execute(
+                    sql_update(SourceTask)
+                    .where(SourceTask.status.in_(["pending", "running"]))
+                    .values(
+                        status="paused",
+                        message="服务重启，任务已暂停。可重新发起以继续未完成的章节。",
+                        updated_at=datetime.now(),
+                    )
+                )
+                logger.info("书源任务表检查完成")
+            except Exception as e:
+                logger.warning(f"书源任务表检查失败（不影响启动）: {e}")
             interrupted_at = datetime.now()
             await conn.execute(
                 sql_update(BackgroundTask)
@@ -210,7 +231,7 @@ from app.api import (
     mcp_plugins, admin, inspiration, prompt_templates,
     changelog, careers, foreshadows, prompt_workshop, book_import,
     project_covers, project_agent, tasks, skills, announcements,
-    polish,
+    polish, source,
 )
 
 app.include_router(auth.router, prefix="/api")
@@ -242,6 +263,7 @@ app.include_router(book_import.router, prefix="/api")  # 拆书导入API
 app.include_router(tasks.router, prefix="/api")  # 后台任务API
 app.include_router(announcements.router, prefix="/api")  # 公告API
 app.include_router(polish.router, prefix="/api")  # 文本重塑API（去AI味/体检/采纳/回退）
+app.include_router(source.router, prefix="/api")  # 书源API（榜单/详情/取源，可关闭）
 
 if getattr(sys, "frozen", False):
     static_dir = Path(sys._MEIPASS) / "backend" / "static"

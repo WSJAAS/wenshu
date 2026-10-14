@@ -269,6 +269,24 @@ def _to_int(v: Any, default: int = 0) -> int:
     return default
 
 
+def _pick_read_count(*candidates: Any) -> int:
+    """从多个候选字段里挑出可信的「在读人数」。
+
+    实测榜单里 `readCount` 与 `read_count` 会同时出现，
+    且**有时 readCount 是 "0" 而 read_count 有真实值**。
+    直接用 readCount 会把一本在榜的书显示成 0 热度。
+
+    策略：取所有候选里的**最大值**。理由是字段缺失记 0、
+    而真实热度不会是 0（能进榜就有数据），因此最大者是可信的那个。
+    """
+    best = 0
+    for c in candidates:
+        v = _to_int(c)
+        if v > best:
+            best = v
+    return best
+
+
 def parse_categories(raw: Any) -> tuple[str, list[str]]:
     """解析 categoryV2，返回 (主分类, 全部标签)。
 
@@ -417,10 +435,12 @@ def parse_rank_page(html: str) -> tuple[list[dict[str, Any]], int]:
             "title": "",                             # 以详情页为准，此处留空
             "author": str(b.get("author") or ""),
             "cover_url": str(b.get("thumbUri") or ""),
-            "read_count": _to_int(b.get("readCount")),
-            # readCount 实测出现 "0" 与 read_count 并存，两个都留着
+            # 榜单里 readCount 与 read_count 会并存且不一定一致，
+            # 取其中可信的那个（详见 _pick_read_count）
+            "read_count": _pick_read_count(b.get("readCount"), b.get("read_count")),
+            "read_count_raw": _to_int(b.get("readCount")),
             "read_count_alt": _to_int(b.get("read_count")),
-            "word_count": _to_int(b.get("wordNumber")),
+            "word_count": _pick_read_count(b.get("wordNumber"), b.get("word_count")),
             "abstract": str(b.get("abstract") or ""),
             "rank_diff": b.get("rankPosDiff"),
         })
