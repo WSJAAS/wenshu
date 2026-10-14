@@ -50,6 +50,7 @@ import { sourceApi } from '../services/api';
 import type {
   SourceBookResponse,
   SourceChapterResult,
+  SourceLoginState,
   SourceRankItem,
   SourceRankResponse,
   SourceSelection,
@@ -121,6 +122,12 @@ export default function Source() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [statusNote, setStatusNote] = useState('');
 
+  // 登录态。未登录时锁定章只有约 200 字符的试读片段 ——
+  // 一本 550 章的书只能完整取到前 10 章，必须让用户看见这件事。
+  const [login, setLogin] = useState<SourceLoginState | null>(null);
+  const [loginInput, setLoginInput] = useState('');
+  const [savingLogin, setSavingLogin] = useState(false);
+
   const [rank, setRank] = useState<SourceRankResponse | null>(null);
   const [loadingRank, setLoadingRank] = useState(false);
   const [rankError, setRankError] = useState(false);
@@ -182,6 +189,33 @@ export default function Source() {
       })
       .catch(() => setEnabled(false));
   }, []);
+
+  // ---- 登录态 ----
+  const loadLogin = useCallback(async () => {
+    try {
+      setLogin(await sourceApi.loginState());
+    } catch {
+      setLogin(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (enabled) void loadLogin();
+  }, [enabled, loadLogin]);
+
+  const saveLogin = useCallback(async () => {
+    setSavingLogin(true);
+    try {
+      const state = await sourceApi.setLogin(loginInput.trim());
+      setLogin(state);
+      setLoginInput('');
+      msgApi.success(state.configured ? '登录态已保存' : '登录态已清除');
+    } catch {
+      msgApi.error('保存失败');
+    } finally {
+      setSavingLogin(false);
+    }
+  }, [loginInput, msgApi]);
 
   const loadTasks = useCallback(async () => {
     try {
@@ -378,6 +412,72 @@ export default function Source() {
         </div>
         <Button icon={<ReloadOutlined />} onClick={loadRank} loading={loadingRank}>刷新榜单</Button>
       </header>
+
+      {/* ---------- 登录态 ----------
+          这是最容易被误解的一处：未登录时平台对锁定章只给约 200 字符的
+          试读片段，抓 550 章会「全部成功」但正文只覆盖很小一部分。
+          所以把状态和入口摆在榜单之前。 */}
+      {login && (
+        <div className="source-notices">
+          <Alert
+            type={login.has_sessionid ? 'success' : 'warning'}
+            showIcon
+            icon={login.has_sessionid ? <InfoCircleOutlined /> : <WarningOutlined />}
+            message={
+              login.has_sessionid
+                ? '已配置登录态，可取得锁定章全文'
+                : login.configured
+                  ? '已配置 Cookie，但缺少 sessionid —— 锁定章仍只能取到试读片段'
+                  : '未配置登录态 —— 锁定章只能取到约 200 字的试读片段'
+            }
+            description={
+              <div>
+                <Paragraph style={{ fontSize: 12, marginBottom: 8 }}>
+                  番茄对未登录访问只开放每本书前 10 章全文，第 11 章起一律
+                  截断为约 200 字符的预览（页面提示「会员登录后，可在网页畅读全文」）。
+                  要取整本，需要在下方填入浏览器登录后的 Cookie。
+                </Paragraph>
+                <Space.Compact style={{ width: '100%', maxWidth: 720 }}>
+                  <Input.Password
+                    value={loginInput}
+                    onChange={(e) => setLoginInput(e.target.value)}
+                    placeholder="粘贴浏览器 Cookie（F12 → Network → 任意请求 → Request Headers → Cookie）"
+                  />
+                  <Button
+                    type="primary"
+                    loading={savingLogin}
+                    onClick={() => void saveLogin()}
+                  >
+                    保存
+                  </Button>
+                  {login.configured && (
+                    <Button
+                      onClick={() => {
+                        setLoginInput('');
+                        void (async () => {
+                          setSavingLogin(true);
+                          try {
+                            setLogin(await sourceApi.setLogin(''));
+                            msgApi.success('登录态已清除');
+                          } finally {
+                            setSavingLogin(false);
+                          }
+                        })();
+                      }}
+                    >
+                      清除
+                    </Button>
+                  )}
+                </Space.Compact>
+                <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
+                  Cookie 只在本机保存并原样转发，不入库、不进 git。
+                  {login.saved_to ? ` 位置：${login.saved_to}` : ''}
+                </Paragraph>
+              </div>
+            }
+          />
+        </div>
+      )}
 
       {/* ---------- 数据口径与覆盖范围 ----------
           这三条是必须保留的：不把部分当全部，并说明数据的时间口径。 */}

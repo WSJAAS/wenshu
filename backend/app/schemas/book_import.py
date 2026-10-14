@@ -68,6 +68,25 @@ class BookImportTaskStatusResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # ---------- AI 使用情况 ----------
+    #
+    # 这两个字段独立于 message 存在，因为 message 会被后续的进度更新
+    # 覆盖掉：AI 失败时写了「使用规则推断」，但接下来「正在生成大纲」
+    # 「解析完成」等消息会把它冲掉，用户最终只看到一句中性提示，
+    # 无从知道产出其实是规则生成的。
+    ai_used: bool = Field(
+        default=False,
+        description="本次是否成功使用过 AI",
+    )
+    ai_degraded: bool = Field(
+        default=False,
+        description="本次是否发生过 AI 降级（回退到规则推断）",
+    )
+    ai_fallback_reasons: list[str] = Field(
+        default_factory=list,
+        description="降级原因，例如「项目信息（HTTPStatusError）」",
+    )
+
 
 class BookImportPreviewResponse(BaseModel):
     """预览数据响应"""

@@ -81,6 +81,30 @@ class _BookImportTask:
     # 步骤级失败记录
     failed_steps: list[_StepFailure] = field(default_factory=list)
 
+    # ---------- AI 使用情况 ----------
+    #
+    # 为什么要单独记录：AI 不可用时流程会回退到规则推断，
+    # 回退说明写在 message 里，但**后续的进度更新会把它覆盖掉**，
+    # 用户最终只看到一句中性的「解析完成，可预览并确认导入」，
+    # 无从知道产出其实是规则生成的。
+    #
+    # 因此把 AI 使用情况独立成字段，只在降级时累加，不被进度覆盖。
+    ai_used: bool = False                 # 是否成功用过 AI
+    ai_fallback_reasons: list[str] = field(default_factory=list)
+
+    def note_ai_ok(self) -> None:
+        self.ai_used = True
+
+    def note_ai_fallback(self, reason: str) -> None:
+        """记录一次 AI 降级。同一原因只记一次，避免刷屏。"""
+        if reason not in self.ai_fallback_reasons:
+            self.ai_fallback_reasons.append(reason)
+
+    @property
+    def ai_degraded(self) -> bool:
+        """本次是否发生过 AI 降级。"""
+        return bool(self.ai_fallback_reasons)
+
 
 class BookImportService:
     """拆书导入服务（首版：内存任务 + 规则解析）"""
@@ -1163,6 +1187,7 @@ class BookImportService:
 
         if not sampled_text:
             if task:
+                task.note_ai_fallback("文本样本不足")
                 self._set_task_state(task, status="running", progress=95, message="文本样本不足，使用规则推断项目信息")
             return fallback
 
@@ -1244,12 +1269,14 @@ class BookImportService:
                 )
 
                 if task:
+                    task.note_ai_ok()
                     self._set_task_state(task, status="running", progress=95, message="项目信息生成完毕，准备预览...")
 
                 return result
         except Exception as exc:
             logger.warning(f"反向生成项目信息失败，回退规则推断: {exc}")
             if task:
+                task.note_ai_fallback(f"项目信息（{type(exc).__name__}）")
                 self._set_task_state(task, status="running", progress=95, message="AI生成失败，使用规则推断项目信息")
             return fallback
 
@@ -1351,12 +1378,14 @@ class BookImportService:
                 ]
 
                 if task:
+                    task.note_ai_ok()
                     self._set_task_state(task, status="running", progress=99, message="大纲反向生成完成，正在整理预览...")
 
                 return outlines
         except Exception as exc:
             logger.warning(f"反向生成章节大纲失败，回退规则大纲: {exc}")
             if task:
+                task.note_ai_fallback(f"章节大纲（{type(exc).__name__}）")
                 self._set_task_state(task, status="running", progress=99, message="AI大纲生成失败，使用规则大纲")
             return fallback_outlines
 
@@ -2260,6 +2289,10 @@ class BookImportService:
             error=task.error,
             created_at=task.created_at,
             updated_at=task.updated_at,
+            # AI 使用情况独立于 message 传递，不会被进度更新覆盖
+            ai_used=task.ai_used,
+            ai_degraded=task.ai_degraded,
+            ai_fallback_reasons=list(task.ai_fallback_reasons),
         )
 
     def _set_task_state(

@@ -223,6 +223,9 @@ def _task_to_summary(t: SourceTask) -> TaskSummary:
 _CHAPTER_FIELDS = (
     "item_id", "title", "text", "volume", "order",
     "status", "error", "pua_before", "pua_after", "chars",
+    # 截断判定所需的两个事实。漏掉它们会让读回的任务丢失依据：
+    # 分章接口就没法告诉前端「这章申报了多少字、为何判为试读」。
+    "is_locked", "claimed_words",
 )
 # 缺了这些字段说明数据不可用，必须报错而不是静默补默认值
 _CHAPTER_REQUIRED = ("item_id", "status")
@@ -754,6 +757,9 @@ async def get_source_task_chapters(
             "chars": c.chars,
             "pua_before": c.pua_before,
             "pua_after": c.pua_after,
+            # 截断判定依据：前端据此显示「取得 N 字 / 申报 M 字」
+            "is_locked": c.is_locked,
+            "claimed_words": c.claimed_words,
         }
         if include_text:
             entry["text"] = c.text

@@ -33,6 +33,7 @@ import type {
   AcceptResponse,
   AcceptRecord,
   SourceStatus,
+  SourceLoginState,
   SourceRankResponse,
   SourceBookResponse,
   SourceTask,

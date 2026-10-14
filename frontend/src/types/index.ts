@@ -692,6 +692,19 @@ export interface SourceStatus {
   enabled: boolean;
   module: string;
   note: string;
+  /** 是否已配置登录 Cookie */
+  login_configured?: boolean;
+  /** Cookie 里是否含 sessionid（能取全文的关键项） */
+  login_has_session?: boolean;
+  login_note?: string;
+}
+
+export interface SourceLoginState {
+  configured: boolean;
+  has_sessionid: boolean;
+  names: string[];
+  note: string;
+  saved_to?: string;
 }
 
 export interface SourceRankItem {
