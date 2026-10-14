@@ -1068,7 +1068,7 @@ export const sourceApi = {
   /** 模块开关状态。前端据此决定是否显示书源入口。 */
   status: () => api.get<unknown, SourceStatus>('/source/status'),
 
-  /** 榜单。返回里含覆盖范围与时间口径说明，必须如实展示。 */
+  /** 榜单。保留采集元数据供调用方使用，阅读界面直接展示作品。 */
   rank: (enrich = true, interval = 1.2) =>
     api.get<unknown, SourceRankResponse>(
       `/source/rank?enrich=${enrich}&interval=${interval}`

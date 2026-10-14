@@ -49,8 +49,9 @@ check("首页可取", st == 200 and bool(js))
 if js:
     st2, bundle = call("GET", f"/assets/{js.group(1)}", timeout=60)
     check("包可下载", st2 == 200, f"{len(bundle)} 字节")
-    for kw in ("在线书源", "开始抓取", "交给拆书导入", "导出 TXT",
-               "字体混淆", "开篇若干章", "指定卷", "整本"):
+    # 这些是数据诚实性相关的文案，界面必须保留
+    for kw in ("在线书源", "获取所选章节", "交给拆书导入", "导出 TXT",
+               "开篇", "指定卷", "整本", "可能带字体混淆"):
         check(f"含文案「{kw}」", kw in bundle)
 
 print()

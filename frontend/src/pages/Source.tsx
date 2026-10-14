@@ -1,11 +1,17 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Alert,
   Badge,
   Button,
   Card,
   Col,
-  Descriptions,
+  Collapse,
+  Drawer,
+  Empty,
+  Grid,
+  Input,
   InputNumber,
   List,
   message,
@@ -13,6 +19,9 @@ import {
   Progress,
   Radio,
   Row,
+  Segmented,
+  Select,
+  Skeleton,
   Space,
   Spin,
   Statistic,
@@ -29,9 +38,13 @@ import {
   StopOutlined,
   TrophyOutlined,
   ImportOutlined,
-  WarningOutlined,
+  ArrowLeftOutlined,
+  BookOutlined,
+  ReadOutlined,
+  RightOutlined,
+  SearchOutlined,
   InfoCircleOutlined,
-  FileTextOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import { sourceApi } from '../services/api';
 import type {
@@ -43,6 +56,7 @@ import type {
   SourceTask,
   SourceTaskChaptersResponse,
 } from '../types';
+import './Source.css';
 
 const { Text, Title, Paragraph } = Typography;
 
@@ -73,8 +87,32 @@ function fmtCount(n: number | undefined): string {
   return n.toLocaleString();
 }
 
+function BookCover({ src, title, large = false }: { src?: string; title: string; large?: boolean }) {
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  return (
+    <span className={`source-book-cover${large ? ' source-book-cover-large' : ''}`}>
+      {src && src !== failedSrc ? (
+        <img
+          src={src}
+          alt={`${title}封面`}
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onError={() => setFailedSrc(src)}
+        />
+      ) : (
+        <span className="source-cover-placeholder" role="img" aria-label={`${title}暂无封面`}>
+          <BookOutlined />
+          {large && <span>{title}</span>}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export default function Source() {
   const { token } = theme.useToken();
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   const [msgApi, ctxHolder] = message.useMessage();
 
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -82,9 +120,18 @@ export default function Source() {
 
   const [rank, setRank] = useState<SourceRankResponse | null>(null);
   const [loadingRank, setLoadingRank] = useState(false);
+  const [rankError, setRankError] = useState(false);
+  const [query, setQuery] = useState('');
+  const [category, setCategory] = useState('');
+  const [bookStatus, setBookStatus] = useState('全部');
 
+  const [selectedBook, setSelectedBook] = useState<SourceRankItem | null>(null);
   const [book, setBook] = useState<SourceBookResponse | null>(null);
   const [loadingBook, setLoadingBook] = useState(false);
+  const [bookError, setBookError] = useState(false);
+  const bookRequest = useRef(0);
+  const rankRequest = useRef(0);
+  const bookTrigger = useRef<HTMLElement | null>(null);
 
   const [preset, setPreset] = useState<'first' | 'volume' | 'all'>('first');
   const [count, setCount] = useState(12);
@@ -94,6 +141,34 @@ export default function Source() {
   const [task, setTask] = useState<SourceTask | null>(null);
   const [chapters, setChapters] = useState<SourceTaskChaptersResponse | null>(null);
   const [tasks, setTasks] = useState<SourceTask[]>([]);
+
+  const categories = useMemo(
+    () => [...new Set((rank?.items ?? []).map((item) => item.category).filter((value): value is string => !!value))],
+    [rank],
+  );
+  const visibleBooks = useMemo(() => {
+    const keyword = query.trim().toLocaleLowerCase();
+    return (rank?.items ?? []).map((item, index) => ({ item, position: index + 1 })).filter(({ item }) => (
+      (!keyword || `${item.title} ${item.author}`.toLocaleLowerCase().includes(keyword))
+      && (!category || item.category === category)
+      && (bookStatus === '全部' || item.status?.includes(bookStatus))
+    ));
+  }, [rank, query, category, bookStatus]);
+  const preview = book?.book ?? selectedBook;
+  const sourceStyle = {
+    '--source-bg': token.colorBgContainer,
+    '--source-text': token.colorText,
+    '--source-muted': token.colorTextSecondary,
+    '--source-border': token.colorBorderSecondary,
+    '--source-accent': token.colorPrimary,
+    '--source-tint': token.colorPrimaryBg,
+    '--source-hover': token.colorFillQuaternary,
+  } as CSSProperties;
+
+  useEffect(() => () => {
+    bookRequest.current += 1;
+    rankRequest.current += 1;
+  }, []);
 
   // ---- 模块状态 ----
   useEffect(() => {
@@ -120,44 +195,53 @@ export default function Source() {
 
   // ---- 榜单 ----
   const loadRank = useCallback(async () => {
+    const request = ++rankRequest.current;
     setLoadingRank(true);
+    setRankError(false);
     try {
-      const r = await sourceApi.rank(true, interval);
+      const r = await sourceApi.rank();
+      if (request !== rankRequest.current) return;
       setRank(r);
     } catch (e: unknown) {
+      if (request !== rankRequest.current) return;
+      setRankError(true);
       const err = e as { response?: { data?: { detail?: string } }; message?: string };
       msgApi.error(`读取榜单失败：${err?.response?.data?.detail || err?.message}`);
     } finally {
-      setLoadingRank(false);
+      if (request === rankRequest.current) setLoadingRank(false);
     }
-  }, [interval, msgApi]);
+  }, [msgApi]);
 
   useEffect(() => {
     if (enabled) loadRank();
   }, [enabled, loadRank]);
 
   // ---- 详情 ----
-  const openBook = async (bookId: string) => {
+  const openBook = async (item: SourceRankItem) => {
+    const request = ++bookRequest.current;
+    if (!selectedBook) bookTrigger.current = document.activeElement as HTMLElement;
+    setSelectedBook(item);
     setLoadingBook(true);
+    setBookError(false);
     setBook(null);
-    setTask(null);
-    setChapters(null);
     try {
-      const b = await sourceApi.book(bookId, interval);
+      const b = await sourceApi.book(item.book_id, interval);
+      if (request !== bookRequest.current) return;
       setBook(b);
-      if (b.volumes.length) setVolume(b.volumes[0].name);
-      // 滚动到选章区
-      setTimeout(() => {
-        document.getElementById('source-picker')?.scrollIntoView({
-          behavior: 'smooth', block: 'start',
-        });
-      }, 100);
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } }; message?: string };
-      msgApi.error(`读取详情失败：${err?.response?.data?.detail || err?.message}`);
+      setVolume(b.volumes[0]?.name ?? '');
+    } catch {
+      if (request === bookRequest.current) setBookError(true);
     } finally {
-      setLoadingBook(false);
+      if (request === bookRequest.current) setLoadingBook(false);
     }
+  };
+
+  const closeBook = () => {
+    bookRequest.current += 1;
+    setSelectedBook(null);
+    setBook(null);
+    setLoadingBook(false);
+    setBookError(false);
   };
 
   // ---- 创建任务 ----
@@ -177,6 +261,7 @@ export default function Source() {
       });
       setTask(t);
       setChapters(null);
+      closeBook();
       msgApi.success(`已创建取源任务，计划抓取 ${t.total_chapters} 章`);
       loadTasks();
     } catch (e: unknown) {
@@ -239,8 +324,6 @@ export default function Source() {
     window.open(sourceApi.txtUrl(task.task_id), '_blank');
   };
 
-  const isMobile = window.innerWidth <= 768;
-
   // ============================================================
   //  未启用
   // ============================================================
@@ -280,176 +363,197 @@ export default function Source() {
   //  正常界面
   // ============================================================
   return (
-    <div style={{ padding: isMobile ? 12 : 24, maxWidth: 1440, margin: '0 auto' }}>
+    <div className="source-page" style={sourceStyle}>
       {ctxHolder}
 
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+      <header className="source-header">
         <div>
-          <Title level={4} style={{ marginBottom: 4 }}>
-            <CloudDownloadOutlined /> 在线书源
-          </Title>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            从公开页面取书 → 还原字体编码 → 交本地拆书分析。内容仅作本地研读。
-          </Text>
+          <Link to="/" className="source-back"><ArrowLeftOutlined /> 返回书架</Link>
+          <div className="source-eyebrow"><TrophyOutlined /> 发现好故事</div>
+          <Title level={2} className="source-title">番茄小说榜单</Title>
+          <Text type="secondary">看看大家在读什么，点开一本了解更多。</Text>
         </div>
-        <Space>
-          <Tooltip title="请求间隔。实测单章 0.2~0.4s，但连续整本的风控代价未知，建议保持 1s 以上">
-            <Space size={4}>
-              <Text type="secondary" style={{ fontSize: 12 }}>间隔</Text>
-              <InputNumber
-                size="small" min={0.2} max={10} step={0.2}
-                value={interval} onChange={(v) => setInterval(v ?? 1.2)}
-                style={{ width: 72 }} addonAfter="s"
-              />
-            </Space>
-          </Tooltip>
-          <Button size="small" icon={<ReloadOutlined />} onClick={loadRank} loading={loadingRank}>
-            刷新榜单
-          </Button>
-        </Space>
-      </div>
+        <Button icon={<ReloadOutlined />} onClick={loadRank} loading={loadingRank}>刷新榜单</Button>
+      </header>
 
-      {/* ---------- 榜单 ---------- */}
-      <Card
-        size="small"
-        title={<Space><TrophyOutlined /><Text strong>榜单</Text>
-          {rank && <Tag>{rank.fetched} 本</Tag>}
-        </Space>}
-        extra={
-          <Tooltip title={rank?.platform_note}>
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              <InfoCircleOutlined /> 数据口径
-            </Text>
-          </Tooltip>
-        }
-        style={{ marginBottom: 16 }}
-        loading={loadingRank && !rank}
-      >
-        {rank && (
-          <>
-            {/* 覆盖范围：必须如实展示，不能假装是完整榜单 */}
+      {/* ---------- 数据口径与覆盖范围 ----------
+          这三条是必须保留的：不把部分当全部，并说明数据的时间口径。 */}
+      {rank && (
+        <div className="source-notices">
+          <Alert
+            type={rank.is_complete ? 'success' : 'warning'}
+            showIcon
+            icon={<InfoCircleOutlined />}
+            message={rank.coverage_note}
+            description={
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {rank.platform_note}
+                {rank.enrich_failed > 0 && (
+                  <> 其中 {rank.enrich_failed} 本详情补取失败，书名以榜单页为准，可能带字体混淆。</>
+                )}
+              </Text>
+            }
+          />
+          {rank.garbled_titles > 0 && (
             <Alert
-              type={rank.is_complete ? 'success' : 'warning'}
+              type="warning"
               showIcon
-              style={{ marginBottom: 12 }}
-              message={rank.coverage_note}
+              icon={<WarningOutlined />}
+              message={`有 ${rank.garbled_titles} 本书名可能未正确还原`}
               description={
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  {rank.platform_note}
-                  {rank.enrich_failed > 0 && (
-                    <> 详情补取失败 {rank.enrich_failed} 本，书名以榜单页为准。</>
-                  )}
+                  详情补取失败时只能退回榜单页书名，而榜单页书名带字体编码混淆。
+                  点开详情可确认真实书名。
                 </Text>
               }
             />
+          )}
+        </div>
+      )}
 
-            <Table<SourceRankItem>
-              size="small"
-              rowKey="book_id"
-              pagination={false}
-              scroll={{ x: 'max-content' }}
-              dataSource={rank.items}
-              columns={[
-                {
-                  title: '#', width: 44, align: 'center',
-                  render: (_v, _r, i) => i + 1,
-                },
-                {
-                  title: '书名', dataIndex: 'title', ellipsis: true,
-                  render: (t: string, r) => (
-                    <Space size={4}>
-                      <Text strong style={{ fontSize: 13 }}>{t}</Text>
-                      {r.title_may_be_garbled && (
-                        <Tooltip title="详情补取失败，书名取自榜单页，可能带字体混淆">
-                          <WarningOutlined style={{ color: token.colorWarning }} />
-                        </Tooltip>
-                      )}
-                    </Space>
-                  ),
-                },
-                { title: '作者', dataIndex: 'author', width: 130, ellipsis: true },
-                {
-                  title: '在读', dataIndex: 'read_count', width: 100, align: 'right',
-                  render: (v: number) => fmtCount(v),
-                },
-                {
-                  title: '字数', dataIndex: 'word_count', width: 100, align: 'right',
-                  render: (v: number) => fmtCount(v),
-                },
-                {
-                  title: '分类', dataIndex: 'category', width: 110, ellipsis: true,
-                  render: (c: string) => c ? <Tag color="blue">{c}</Tag> : <Text type="secondary">—</Text>,
-                },
-                {
-                  title: '状态', dataIndex: 'status', width: 70,
-                  render: (s: string) => s
-                    ? <Tag color={s === '完结' ? 'green' : 'orange'}>{s}</Tag>
-                    : <Text type="secondary">—</Text>,
-                },
-                {
-                  title: '操作', width: 90, fixed: 'right',
-                  render: (_v, r) => (
-                    <Button
-                      size="small" type="link"
-                      onClick={() => openBook(r.book_id)}
-                    >
-                      选章
-                    </Button>
-                  ),
-                },
-              ]}
+      {/* ---------- 榜单 ---------- */}
+      <section className="source-rank-panel" aria-label="小说榜单">
+        <div className="source-rank-toolbar">
+          <Segmented
+            aria-label="作品状态"
+            value={bookStatus}
+            options={['全部', '连载', '完结']}
+            onChange={setBookStatus}
+          />
+          <div className="source-search-controls">
+            {categories.length > 1 && (
+              <Select
+                aria-label="筛选分类"
+                value={category}
+                onChange={setCategory}
+                options={[{ value: '', label: '全部分类' }, ...categories.map((name) => ({ value: name, label: name }))]}
+                style={{ minWidth: 116 }}
+              />
+            )}
+            <Input
+              className="source-search"
+              aria-label="搜索榜单"
+              placeholder="搜索榜单书名、作者"
+              prefix={<SearchOutlined />}
+              allowClear
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
             />
-          </>
+          </div>
+        </div>
+        {loadingRank && !rank ? (
+          <div className="source-rank-skeleton" aria-label="正在打开榜单">
+            {[0, 1, 2, 3, 4].map((index) => <Skeleton key={index} active avatar={{ shape: 'square', size: 64 }} paragraph={{ rows: 1 }} />)}
+          </div>
+        ) : visibleBooks.length ? (
+          <ol className="source-rank-list">
+            {visibleBooks.map(({ item, position }) => (
+              <li key={item.book_id}>
+                <button
+                  type="button"
+                  className="source-rank-row"
+                  aria-label={`查看《${item.title}》详情`}
+                  aria-haspopup="dialog"
+                  onClick={() => openBook(item)}
+                >
+                  <span className={`source-rank-number${position <= 3 ? ` source-rank-top-${position}` : ''}`}>
+                    {String(position).padStart(2, '0')}
+                  </span>
+                  <BookCover src={item.cover_url} title={item.title} />
+                  <span className="source-rank-info">
+                    <span className="source-rank-title">{item.title}</span>
+                    <span className="source-rank-author">{item.author || '佚名'}</span>
+                    <span className="source-rank-tags">
+                      {item.category && <span>{item.category}</span>}
+                      {item.status && <span>{item.status}</span>}
+                      <span>{fmtCount(item.word_count)}字</span>
+                    </span>
+                  </span>
+                  <span className="source-rank-readers">
+                    <strong>{fmtCount(item.read_count)}</strong>
+                    <span>人在读</span>
+                  </span>
+                  <RightOutlined className="source-rank-arrow" />
+                </button>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <div className="source-rank-empty">
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description={rankError && !rank ? '暂时无法打开榜单' : query || category || bookStatus !== '全部' ? '没有找到符合条件的书籍' : '暂无榜单作品'}
+            >
+              {query || category || bookStatus !== '全部' ? (
+                <Button onClick={() => { setQuery(''); setCategory(''); setBookStatus('全部'); }}>清除筛选</Button>
+              ) : (
+                <Button onClick={loadRank} loading={loadingRank}>重新打开</Button>
+              )}
+            </Empty>
+          </div>
         )}
-      </Card>
+      </section>
 
       {/* ---------- 详情与选章 ---------- */}
-      {book && (
-        <Card
-          id="source-picker"
-          size="small"
-          title={<Space><FileTextOutlined /><Text strong>{book.book.title}</Text></Space>}
-          extra={<Button size="small" onClick={() => setBook(null)}>收起</Button>}
-          style={{ marginBottom: 16 }}
-          loading={loadingBook}
-        >
-          <Row gutter={[16, 12]}>
-            <Col xs={24} lg={10}>
-              <Descriptions size="small" column={1} bordered>
-                <Descriptions.Item label="作者">{book.book.author || '—'}</Descriptions.Item>
-                <Descriptions.Item label="分类">
-                  <Space size={4} wrap>
-                    {book.book.category && <Tag color="blue">{book.book.category}</Tag>}
-                    {book.book.tags.filter((t) => t !== book.book.category).map((t) => (
-                      <Tag key={t}>{t}</Tag>
-                    ))}
-                  </Space>
-                </Descriptions.Item>
-                <Descriptions.Item label="体量">
-                  {fmtCount(book.book.word_count)} 字 · {book.chapters.length} 章
-                </Descriptions.Item>
-                <Descriptions.Item label="热度">
-                  {fmtCount(book.book.read_count)} 人在读
-                </Descriptions.Item>
-                <Descriptions.Item label="状态">{book.book.status || '—'}</Descriptions.Item>
-                <Descriptions.Item label="最新章节">
-                  <Text style={{ fontSize: 12 }}>{book.book.last_chapter_title || '—'}</Text>
-                </Descriptions.Item>
-              </Descriptions>
-
-              <Alert
-                type="info"
-                showIcon
-                style={{ marginTop: 12 }}
-                message="关于锁定标记"
-                description={
-                  <Text style={{ fontSize: 12 }}>{book.lock_field_note}</Text>
-                }
-              />
-            </Col>
-
-            <Col xs={24} lg={14}>
-              <Text strong style={{ fontSize: 13 }}>选择要抓取的章节</Text>
+      <Drawer
+        title="书籍详情"
+        rootClassName="source-book-drawer"
+        width={isMobile ? '100%' : 720}
+        open={!!selectedBook}
+        onClose={closeBook}
+        afterOpenChange={(open) => { if (!open) bookTrigger.current?.focus({ preventScroll: true }); }}
+        styles={{ body: sourceStyle }}
+        destroyOnHidden
+      >
+        {preview && (
+          <>
+            <div className="source-book-heading">
+              <BookCover src={preview.cover_url} title={preview.title} large />
+              <div className="source-book-heading-text">
+                <Title level={3}>{preview.title}</Title>
+                <Text type="secondary">{preview.author || '佚名'} 著</Text>
+                <Space className="source-book-tags" size={[4, 8]} wrap>
+                  {preview.status && <Tag color={preview.status.includes('完结') ? 'green' : 'cyan'}>{preview.status}</Tag>}
+                  {[...new Set([preview.category, ...(preview.tags ?? [])].filter(Boolean))].map((tag) => <Tag key={tag}>{tag}</Tag>)}
+                </Space>
+                <Button
+                  icon={<ReadOutlined />}
+                  href={`https://fanqienovel.com/page/${encodeURIComponent(preview.book_id)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >在番茄阅读</Button>
+              </div>
+            </div>
+            <div className="source-book-stats">
+              <div><strong>{fmtCount(preview.read_count)}</strong><span>人在读</span></div>
+              <div><strong>{fmtCount(preview.word_count)}</strong><span>字</span></div>
+              {book && <div><strong>{book.chapters.length.toLocaleString()}</strong><span>章</span></div>}
+            </div>
+            <section className="source-book-intro" aria-label="作品简介">
+              <Title level={5}>作品简介</Title>
+              {!preview.abstract && loadingBook ? <Skeleton active title={false} paragraph={{ rows: 4 }} /> : (
+                <Paragraph className="source-book-abstract">{preview.abstract?.trim() || '暂无简介'}</Paragraph>
+              )}
+            </section>
+            {preview.last_chapter_title && (
+              <div className="source-book-latest"><Text type="secondary">最新章节</Text><Text>{preview.last_chapter_title}</Text></div>
+            )}
+          </>
+        )}
+        {loadingBook && <div className="source-book-loading"><Spin size="small" /><Text type="secondary">正在加载目录…</Text></div>}
+        {bookError && selectedBook && (
+          <Alert
+            type="error"
+            showIcon
+            message="暂时无法打开完整详情"
+            action={<Button size="small" onClick={() => openBook(selectedBook)}>重试</Button>}
+          />
+        )}
+        {book && (
+          <Collapse
+            className="source-chapter-picker"
+            items={[{ key: book.book.book_id, label: <Space><BookOutlined />选择章节研读</Space>, children: (
+            <div>
               <div style={{ marginTop: 8 }}>
                 <Radio.Group
                   value={preset}
@@ -511,20 +615,30 @@ export default function Source() {
                 )}
               </div>
 
-              <div style={{ marginTop: 16 }}>
+              <div className="source-picker-actions">
+                <Space size={8}>
+                  <Text type="secondary">请求间隔</Text>
+                  <InputNumber
+                    aria-label="章节请求间隔"
+                    size="small" min={0.2} max={10} step={0.2}
+                    value={interval} onChange={(value) => setInterval(value ?? 1.2)}
+                    style={{ width: 90 }} addonAfter="s"
+                  />
+                </Space>
                 <Button
                   type="primary"
                   icon={<CloudDownloadOutlined />}
                   onClick={createTask}
                   disabled={preset === 'volume' && !volume}
                 >
-                  开始抓取
+                  获取所选章节
                 </Button>
               </div>
-            </Col>
-          </Row>
-        </Card>
-      )}
+            </div>
+            ) }]}
+          />
+        )}
+      </Drawer>
 
       {/* ---------- 任务进度 ---------- */}
       {task && (

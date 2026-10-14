@@ -722,7 +722,7 @@ export interface SourceRankItem {
 export interface SourceRankResponse {
   items: SourceRankItem[];
   fetched: number;
-  /** 平台声明的总数。首屏通常只返回部分，必须如实展示覆盖范围 */
+  /** 平台声明的总数，供采集逻辑判断覆盖范围。 */
   declared_total: number;
   enriched: number;
   enrich_failed: number;

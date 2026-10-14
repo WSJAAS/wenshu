@@ -362,12 +362,16 @@ def parse_book_page(html: str, book_id: str) -> tuple[BookInfo, list[ChapterRef]
         last_chapter_title=str(page.get("lastChapterTitle") or ""),
     )
 
-    # 状态：creationStatus 实测 0=连载 1=完结
-    cs = page.get("creationStatus")
-    if cs == 0:
-        book.status = "连载"
-    elif cs == 1:
-        book.status = "完结"
+    # 状态来自 creationStatus，不是 page.status。
+    #
+    # 实测结论（20 本抽样，用页面 DOM 文案做基准交叉验证）：
+    #   creationStatus = "1" → 连载中
+    #   creationStatus = "0" → 已完结
+    #
+    # 注意 page.status 是**另一个字段，实测恒为 "1"**，不能用于判断状态；
+    # 它和 creationStatus 不是一回事，别混用。
+    _CS_MAP = {"1": "连载", "0": "完结"}
+    book.status = _CS_MAP.get(str(page.get("creationStatus")), "")
 
     chapters: list[ChapterRef] = []
     volumes = page.get("chapterListWithVolume") or []
