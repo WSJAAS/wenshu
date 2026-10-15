@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -7,21 +7,13 @@ import {
   Button,
   Card,
   Col,
-  Collapse,
-  Drawer,
-  Empty,
   Grid,
   Input,
-  InputNumber,
   List,
   message,
   Popconfirm,
   Progress,
-  Radio,
   Row,
-  Segmented,
-  Select,
-  Skeleton,
   Space,
   Spin,
   Statistic,
@@ -33,16 +25,11 @@ import {
 } from 'antd';
 import {
   CloudDownloadOutlined,
-  ReloadOutlined,
   SaveOutlined,
   StopOutlined,
-  TrophyOutlined,
   ImportOutlined,
   ArrowLeftOutlined,
   BookOutlined,
-  ReadOutlined,
-  RightOutlined,
-  SearchOutlined,
   InfoCircleOutlined,
   WarningOutlined,
   LinkOutlined,
@@ -52,13 +39,8 @@ import type {
   BookImportTask,
   ExtDownloadJob,
   ExtDownloadStatus,
-  SourceBookResponse,
   SourceChapterResult,
-  SourceHandoverGuide,
   SourceLoginState,
-  SourceRankItem,
-  SourceRankResponse,
-  SourceSelection,
   SourceTask,
   SourceTaskChaptersResponse,
 } from '../types';
@@ -74,7 +56,6 @@ const { Text, Title, Paragraph } = Typography;
  * 后端连不上时，用户更需要能自己打开番茄去看看。
  */
 const FANQIE_HOME = 'https://fanqienovel.com/';
-const FANQIE_RANK = 'https://fanqienovel.com/rank';
 
 /** 逐章状态的展示样式 */
 const STATUS_META: Record<string, { color: string; label: string }> = {
@@ -181,35 +162,6 @@ function parseBookId(raw: string): string {
   ));
 }
 
-function fmtCount(n: number | undefined): string {
-  if (!n) return '0';
-  if (n >= 100000000) return `${(n / 100000000).toFixed(2)}亿`;
-  if (n >= 10000) return `${(n / 10000).toFixed(1)}万`;
-  return n.toLocaleString();
-}
-
-function BookCover({ src, title, large = false }: { src?: string; title: string; large?: boolean }) {
-  const [failedSrc, setFailedSrc] = useState<string | null>(null);
-  return (
-    <span className={`source-book-cover${large ? ' source-book-cover-large' : ''}`}>
-      {src && src !== failedSrc ? (
-        <img
-          src={src}
-          alt={`${title}封面`}
-          loading="lazy"
-          referrerPolicy="no-referrer"
-          onError={() => setFailedSrc(src)}
-        />
-      ) : (
-        <span className="source-cover-placeholder" role="img" aria-label={`${title}暂无封面`}>
-          <BookOutlined />
-          {large && <span>{title}</span>}
-        </span>
-      )}
-    </span>
-  );
-}
-
 export default function Source() {
   const { token } = theme.useToken();
   const screens = Grid.useBreakpoint();
@@ -220,38 +172,13 @@ export default function Source() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [statusNote, setStatusNote] = useState('');
 
-  // 登录态。未登录时锁定章只有约 200 字符的试读片段 ——
-  // 一本 550 章的书只能完整取到前 10 章，必须让用户看见这件事。
+  // 登录态。只影响旧版逐章抓取通道的免费章区间，
+  // 整本全文走外部下载器（App 接口）。保留展示避免误导。
   const [login, setLogin] = useState<SourceLoginState | null>(null);
-  const [loginInput, setLoginInput] = useState('');
-  const [savingLogin, setSavingLogin] = useState(false);
-
-  const [rank, setRank] = useState<SourceRankResponse | null>(null);
-  const [loadingRank, setLoadingRank] = useState(false);
-  const [rankError, setRankError] = useState(false);
-  const [query, setQuery] = useState('');
-  const [category, setCategory] = useState('');
-  const [bookStatus, setBookStatus] = useState('全部');
-
-  const [selectedBook, setSelectedBook] = useState<SourceRankItem | null>(null);
-  const [book, setBook] = useState<SourceBookResponse | null>(null);
-  const [loadingBook, setLoadingBook] = useState(false);
-  const [bookError, setBookError] = useState(false);
-  const bookRequest = useRef(0);
-  const rankRequest = useRef(0);
-  const bookTrigger = useRef<HTMLElement | null>(null);
-
-  const [preset, setPreset] = useState<'first' | 'volume' | 'all'>('first');
-  const [count, setCount] = useState(12);
-  const [volume, setVolume] = useState('');
-  const [interval, setInterval] = useState(1.2);
 
   const [task, setTask] = useState<SourceTask | null>(null);
   const [chapters, setChapters] = useState<SourceTaskChaptersResponse | null>(null);
   const [tasks, setTasks] = useState<SourceTask[]>([]);
-
-  /** 浏览器联动的安装指引。拿不到就不显示这一块。 */
-  const [guide, setGuide] = useState<SourceHandoverGuide | null>(null);
 
   /** 交接后拆书模块那边的任务状态。用于显示对方的反应。 */
   const [importTask, setImportTask] = useState<BookImportTask | null>(null);
@@ -267,19 +194,6 @@ export default function Source() {
   /** 轮询是否还在跑。用它挡住重复点击，并保证卸载后不再 setState。 */
   const extPolling = useRef(false);
 
-  const categories = useMemo(
-    () => [...new Set((rank?.items ?? []).map((item) => item.category).filter((value): value is string => !!value))],
-    [rank],
-  );
-  const visibleBooks = useMemo(() => {
-    const keyword = query.trim().toLocaleLowerCase();
-    return (rank?.items ?? []).map((item, index) => ({ item, position: index + 1 })).filter(({ item }) => (
-      (!keyword || `${item.title} ${item.author}`.toLocaleLowerCase().includes(keyword))
-      && (!category || item.category === category)
-      && (bookStatus === '全部' || item.status?.includes(bookStatus))
-    ));
-  }, [rank, query, category, bookStatus]);
-  const preview = book?.book ?? selectedBook;
   const sourceStyle = {
     '--source-bg': token.colorBgContainer,
     '--source-text': token.colorText,
@@ -291,8 +205,6 @@ export default function Source() {
   } as CSSProperties;
 
   useEffect(() => () => {
-    bookRequest.current += 1;
-    rankRequest.current += 1;
     // 卸载后立刻停掉整本下载的轮询，避免继续打后端。
     extPolling.current = false;
   }, []);
@@ -320,33 +232,6 @@ export default function Source() {
     if (enabled) void loadLogin();
   }, [enabled, loadLogin]);
 
-  // ---- 浏览器联动指引 ----
-  const loadGuide = useCallback(async () => {
-    try {
-      setGuide(await sourceApi.handoverGuide());
-    } catch {
-      /* 拿不到指引就不显示这一块 */
-    }
-  }, []);
-
-  useEffect(() => {
-    if (enabled) void loadGuide();
-  }, [enabled, loadGuide]);
-
-  const saveLogin = useCallback(async () => {
-    setSavingLogin(true);
-    try {
-      const state = await sourceApi.setLogin(loginInput.trim());
-      setLogin(state);
-      setLoginInput('');
-      msgApi.success(state.configured ? '登录态已保存' : '登录态已清除');
-    } catch {
-      msgApi.error('保存失败');
-    } finally {
-      setSavingLogin(false);
-    }
-  }, [loginInput, msgApi]);
-
   const loadTasks = useCallback(async () => {
     try {
       const t = await sourceApi.tasks(20);
@@ -359,83 +244,6 @@ export default function Source() {
   useEffect(() => {
     if (enabled) loadTasks();
   }, [enabled, loadTasks]);
-
-  // ---- 榜单 ----
-  const loadRank = useCallback(async () => {
-    const request = ++rankRequest.current;
-    setLoadingRank(true);
-    setRankError(false);
-    try {
-      const r = await sourceApi.rank();
-      if (request !== rankRequest.current) return;
-      setRank(r);
-    } catch (e: unknown) {
-      if (request !== rankRequest.current) return;
-      setRankError(true);
-      const err = e as { response?: { data?: { detail?: string } }; message?: string };
-      msgApi.error(`读取榜单失败：${err?.response?.data?.detail || err?.message}`);
-    } finally {
-      if (request === rankRequest.current) setLoadingRank(false);
-    }
-  }, [msgApi]);
-
-  useEffect(() => {
-    if (enabled) loadRank();
-  }, [enabled, loadRank]);
-
-  // ---- 详情 ----
-  const openBook = async (item: SourceRankItem) => {
-    const request = ++bookRequest.current;
-    if (!selectedBook) bookTrigger.current = document.activeElement as HTMLElement;
-    setSelectedBook(item);
-    setLoadingBook(true);
-    setBookError(false);
-    setBook(null);
-    try {
-      const b = await sourceApi.book(item.book_id, interval);
-      if (request !== bookRequest.current) return;
-      setBook(b);
-      setVolume(b.volumes[0]?.name ?? '');
-    } catch {
-      if (request === bookRequest.current) setBookError(true);
-    } finally {
-      if (request === bookRequest.current) setLoadingBook(false);
-    }
-  };
-
-  const closeBook = () => {
-    bookRequest.current += 1;
-    setSelectedBook(null);
-    setBook(null);
-    setLoadingBook(false);
-    setBookError(false);
-  };
-
-  // ---- 创建任务 ----
-  const createTask = async () => {
-    if (!book) return;
-    const selection: SourceSelection = {
-      preset,
-      count,
-      volume: preset === 'volume' ? volume : '',
-      item_ids: [],
-    };
-    try {
-      const t = await sourceApi.createTask({
-        book_id: book.book.book_id,
-        selection,
-        interval,
-      });
-      setTask(t);
-      setChapters(null);
-      closeBook();
-      msgApi.success(`已创建取源任务，计划抓取 ${t.total_chapters} 章`);
-      loadTasks();
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } }; message?: string };
-      msgApi.error(`创建任务失败：${err?.response?.data?.detail || err?.message}`);
-    }
-  };
 
   // ---- 任务轮询 ----
   useEffect(() => {
@@ -602,26 +410,6 @@ export default function Source() {
     window.open(sourceApi.txtUrl(task.task_id), '_blank');
   };
 
-  /**
-   * 打开脚本地址。
-   *
-   * 直接访问 .user.js 会被浏览器当文件下载；装好油猴后打开同地址
-   * 才会弹出安装页。所以这里也给「复制地址」的备选。
-   */
-  const installScript = () => {
-    window.open(sourceApi.userscriptUrl(), '_blank');
-  };
-
-  const copyScriptUrl = async () => {
-    const url = `${window.location.origin}${sourceApi.userscriptUrl()}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      msgApi.success('脚本地址已复制。装好油猴后打开该地址即可安装。');
-    } catch {
-      msgApi.info(url);
-    }
-  };
-
   // ============================================================
   //  未启用
   // ============================================================
@@ -667,12 +455,12 @@ export default function Source() {
       <header className="source-header">
         <div>
           <Link to="/" className="source-back"><ArrowLeftOutlined /> 返回书架</Link>
-          <div className="source-eyebrow"><TrophyOutlined /> 发现好故事</div>
-          <Title level={2} className="source-title">番茄小说榜单</Title>
-          <Text type="secondary">看看大家在读什么，点开一本了解更多。</Text>
+          <div className="source-eyebrow"><BookOutlined /> 发现好故事</div>
+          <Title level={2} className="source-title">在线书源 · 整本下载</Title>
+          <Text type="secondary">粘贴书籍链接或 ID，整本取回全文（含锁定章）。</Text>
         </div>
         <Space wrap>
-          {/* 去番茄的入口。登录、选书都要在那边操作，
+          {/* 去番茄的入口。找书、复制链接都要在那边操作，
               放在这里省得用户自己去找地址。 */}
           <Button
             icon={<LinkOutlined />}
@@ -682,133 +470,36 @@ export default function Source() {
           >
             打开番茄小说
           </Button>
-          <Button
-            icon={<ReadOutlined />}
-            href={FANQIE_RANK}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            番茄排行榜
-          </Button>
-          <Button icon={<ReloadOutlined />} onClick={loadRank} loading={loadingRank}>
-            刷新榜单
-          </Button>
         </Space>
       </header>
 
       {/* ---------- 登录态 ----------
-          这是最容易被误解的一处：未登录时平台对锁定章只给约 200 字符的
-          试读片段，抓 550 章会「全部成功」但正文只覆盖很小一部分。
-          所以把状态和入口摆在榜单之前。 */}
+          登录态 Cookie 只影响「免费章区间」的逐章抓取通道。
+          整本全文走下面的外部下载器（App 接口），不受此限制；
+          普通登录拿不到网页畅读（那要 SVIP），所以这里不再宣称
+          「配置登录态即可取锁定章全文」。 */}
       {login && (
         <div className="source-notices">
           <Alert
-            type={login.has_sessionid ? 'success' : 'warning'}
+            type={login.has_sessionid ? 'info' : 'warning'}
             showIcon
             icon={login.has_sessionid ? <InfoCircleOutlined /> : <WarningOutlined />}
             message={
               login.has_sessionid
-                ? '已配置登录态，可取得锁定章全文'
+                ? '已配置登录态（用于免费章抓取）'
                 : login.configured
-                  ? '已配置 Cookie，但缺少 sessionid —— 锁定章仍只能取到试读片段'
-                  : '未配置登录态 —— 锁定章只能取到约 200 字的试读片段'
+                  ? '已配置 Cookie，但缺少 sessionid'
+                  : '未配置登录态'
             }
             description={
               <div>
                 <Paragraph style={{ fontSize: 12, marginBottom: 8 }}>
-                  番茄对未登录访问只开放每本书前 10 章全文，第 11 章起一律
-                  截断为约 200 字符的预览（页面提示「会员登录后，可在网页畅读全文」）。
-                  要取整本，需要先登录番茄，再把登录态交给这里。
+                  说明：番茄只对 APP 端免费开放全书，网页端第 11 章起一律
+                  截断为约 200 字符（实测普通登录也一样，网页畅读需 SVIP）。
+                  <Text strong>整本全文不受影响</Text>
+                  —— 用下面的「整本下载」，它走 App 接口，锁定章也是全文。
+                  登录态只影响旧版逐章抓取通道的免费章区间。
                 </Paragraph>
-
-                {/* 先去番茄登录，再回来取登录态。按顺序摆，避免用户跳错。 */}
-                <Space wrap style={{ marginBottom: 10 }}>
-                  <Button
-                    size="small"
-                    type={login.has_sessionid ? 'default' : 'primary'}
-                    icon={<LinkOutlined />}
-                    href={FANQIE_HOME}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    1. 去番茄登录
-                  </Button>
-                  {!login.has_sessionid && (
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      登录后回到本页，用下面的方式把登录态交给文枢
-                    </Text>
-                  )}
-                </Space>
-
-                <Space.Compact style={{ width: '100%', maxWidth: 720 }}>
-                  <Input.Password
-                    value={loginInput}
-                    onChange={(e) => setLoginInput(e.target.value)}
-                    placeholder="粘贴浏览器 Cookie（F12 → Network → 任意请求 → Request Headers → Cookie）"
-                  />
-                  <Button
-                    type="primary"
-                    loading={savingLogin}
-                    onClick={() => void saveLogin()}
-                  >
-                    保存
-                  </Button>
-                  {login.configured && (
-                    <Button
-                      onClick={() => {
-                        setLoginInput('');
-                        void (async () => {
-                          setSavingLogin(true);
-                          try {
-                            setLogin(await sourceApi.setLogin(''));
-                            msgApi.success('登录态已清除');
-                          } finally {
-                            setSavingLogin(false);
-                          }
-                        })();
-                      }}
-                    >
-                      清除
-                    </Button>
-                  )}
-                </Space.Compact>
-                <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-                  Cookie 只在本机保存并原样转发，不入库、不进 git。
-                  {login.saved_to ? ` 位置：${login.saved_to}` : ''}
-                </Paragraph>
-
-                {/* 更省事的做法：让浏览器脚本自动带回登录态与书籍 */}
-                {guide && (
-                  <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px dashed rgba(0,0,0,.1)' }}>
-                    <Text strong style={{ fontSize: 13 }}>
-                      省事做法：装一次浏览器脚本，之后自动带回
-                    </Text>
-                    <Paragraph type="secondary" style={{ fontSize: 12, margin: '6px 0 10px' }}>
-                      装好后，你在番茄网页上看到哪本书，点一下「交给文枢」——
-                      书籍和登录态一起送过来，不用再手工粘 Cookie。
-                    </Paragraph>
-                    <Space wrap>
-                      <Button type="primary" ghost size="small" onClick={installScript}>
-                        安装浏览器脚本
-                      </Button>
-                      <Button size="small" onClick={() => void copyScriptUrl()}>
-                        复制脚本地址
-                      </Button>
-                    </Space>
-                    <div style={{ marginTop: 10 }}>
-                      {guide.steps.map((s, i) => (
-                        <div key={i} style={{ fontSize: 12, color: 'rgba(0,0,0,.55)', lineHeight: 1.9 }}>
-                          {i + 1}. {s}
-                        </div>
-                      ))}
-                    </div>
-                    <Paragraph type="secondary" style={{ fontSize: 11, marginTop: 8, marginBottom: 0 }}>
-                      {guide.notes.map((n, i) => (
-                        <span key={i}>{n}{i < guide.notes.length - 1 ? ' ' : ''}</span>
-                      ))}
-                    </Paragraph>
-                  </div>
-                )}
               </div>
             }
           />
@@ -816,8 +507,7 @@ export default function Source() {
       )}
 
       {/* ---------- 整本下载（外部下载器）----------
-          与上面的取源任务分工不同：取源任务受平台对未登录访问的限制，
-          锁定章只能拿到试读片段；整本下载交给外部下载器抓，含锁定章全文，
+          本页的主入口。走 App 接口整本抓取，锁定章也是全文，
           抓完打包，再导出 TXT 交给拆书导入。 */}
       <Card
         size="small"
@@ -831,7 +521,8 @@ export default function Source() {
         style={{ marginBottom: 16 }}
       >
         <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
-          由外部下载器抓取整本（含锁定章全文），下载完成后可导出 TXT 交给拆书导入。
+          走 App 接口整本抓取，锁定章也是全文（实测 550 章 / 120 万字 / 约 1 分钟）。
+          下载完成后可导出 TXT 交给拆书导入。
         </Text>
 
         <Space.Compact style={{ width: '100%', maxWidth: 720, marginTop: 12 }}>
@@ -840,7 +531,7 @@ export default function Source() {
             value={extInput}
             onChange={(e) => setExtInput(e.target.value)}
             onPressEnter={() => void startExtDownload()}
-            placeholder="书籍 ID 或链接"
+            placeholder="书籍 ID 或链接（如 https://fanqienovel.com/page/7231424472606051384）"
             allowClear
           />
           <Button
@@ -854,8 +545,8 @@ export default function Source() {
         </Space.Compact>
 
         <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-          可以粘番茄的书籍链接，也可以直接填数字 ID；同一时间只跑一个任务，
-          抓取由外部下载器完成，本页只显示进度。
+          在番茄网页上打开要下的书，把地址栏链接粘到这里即可；也可以直接填数字 ID。
+          同一时间只跑一个任务，抓取由外部下载器完成，本页只显示进度。
         </Paragraph>
 
         {extError && (
@@ -926,269 +617,6 @@ export default function Source() {
         )}
       </Card>
 
-      {/* ---------- 数据口径与覆盖范围 ----------
-          这三条是必须保留的：不把部分当全部，并说明数据的时间口径。 */}
-      {rank && (
-        <div className="source-notices">
-          <Alert
-            type={rank.is_complete ? 'success' : 'warning'}
-            showIcon
-            icon={<InfoCircleOutlined />}
-            message={rank.coverage_note}
-            description={
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {rank.platform_note}
-                {rank.enrich_failed > 0 && (
-                  <> 其中 {rank.enrich_failed} 本详情补取失败，书名以榜单页为准，可能带字体混淆。</>
-                )}
-              </Text>
-            }
-          />
-          {rank.garbled_titles > 0 && (
-            <Alert
-              type="warning"
-              showIcon
-              icon={<WarningOutlined />}
-              message={`有 ${rank.garbled_titles} 本书名可能未正确还原`}
-              description={
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  详情补取失败时只能退回榜单页书名，而榜单页书名带字体编码混淆。
-                  点开详情可确认真实书名。
-                </Text>
-              }
-            />
-          )}
-        </div>
-      )}
-
-      {/* ---------- 榜单 ---------- */}
-      <section className="source-rank-panel" aria-label="小说榜单">
-        <div className="source-rank-toolbar">
-          <Segmented
-            aria-label="作品状态"
-            value={bookStatus}
-            options={['全部', '连载', '完结']}
-            onChange={setBookStatus}
-          />
-          <div className="source-search-controls">
-            {categories.length > 1 && (
-              <Select
-                aria-label="筛选分类"
-                value={category}
-                onChange={setCategory}
-                options={[{ value: '', label: '全部分类' }, ...categories.map((name) => ({ value: name, label: name }))]}
-                style={{ minWidth: 116 }}
-              />
-            )}
-            <Input
-              className="source-search"
-              aria-label="搜索榜单"
-              placeholder="搜索榜单书名、作者"
-              prefix={<SearchOutlined />}
-              allowClear
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </div>
-        </div>
-        {loadingRank && !rank ? (
-          <div className="source-rank-skeleton" aria-label="正在打开榜单">
-            {[0, 1, 2, 3, 4].map((index) => <Skeleton key={index} active avatar={{ shape: 'square', size: 64 }} paragraph={{ rows: 1 }} />)}
-          </div>
-        ) : visibleBooks.length ? (
-          <ol className="source-rank-list">
-            {visibleBooks.map(({ item, position }) => (
-              <li key={item.book_id}>
-                <button
-                  type="button"
-                  className="source-rank-row"
-                  aria-label={`查看《${item.title}》详情`}
-                  aria-haspopup="dialog"
-                  onClick={() => openBook(item)}
-                >
-                  <span className={`source-rank-number${position <= 3 ? ` source-rank-top-${position}` : ''}`}>
-                    {String(position).padStart(2, '0')}
-                  </span>
-                  <BookCover src={item.cover_url} title={item.title} />
-                  <span className="source-rank-info">
-                    <span className="source-rank-title">{item.title}</span>
-                    <span className="source-rank-author">{item.author || '佚名'}</span>
-                    <span className="source-rank-tags">
-                      {item.category && <span>{item.category}</span>}
-                      {item.status && <span>{item.status}</span>}
-                      <span>{fmtCount(item.word_count)}字</span>
-                    </span>
-                  </span>
-                  <span className="source-rank-readers">
-                    <strong>{fmtCount(item.read_count)}</strong>
-                    <span>人在读</span>
-                  </span>
-                  <RightOutlined className="source-rank-arrow" />
-                </button>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <div className="source-rank-empty">
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={rankError && !rank ? '暂时无法打开榜单' : query || category || bookStatus !== '全部' ? '没有找到符合条件的书籍' : '暂无榜单作品'}
-            >
-              {query || category || bookStatus !== '全部' ? (
-                <Button onClick={() => { setQuery(''); setCategory(''); setBookStatus('全部'); }}>清除筛选</Button>
-              ) : (
-                <Button onClick={loadRank} loading={loadingRank}>重新打开</Button>
-              )}
-            </Empty>
-          </div>
-        )}
-      </section>
-
-      {/* ---------- 详情与选章 ---------- */}
-      <Drawer
-        title="书籍详情"
-        rootClassName="source-book-drawer"
-        width={isMobile ? '100%' : 720}
-        open={!!selectedBook}
-        onClose={closeBook}
-        afterOpenChange={(open) => { if (!open) bookTrigger.current?.focus({ preventScroll: true }); }}
-        styles={{ body: sourceStyle }}
-        destroyOnHidden
-      >
-        {preview && (
-          <>
-            <div className="source-book-heading">
-              <BookCover src={preview.cover_url} title={preview.title} large />
-              <div className="source-book-heading-text">
-                <Title level={3}>{preview.title}</Title>
-                <Text type="secondary">{preview.author || '佚名'} 著</Text>
-                <Space className="source-book-tags" size={[4, 8]} wrap>
-                  {preview.status && <Tag color={preview.status.includes('完结') ? 'green' : 'cyan'}>{preview.status}</Tag>}
-                  {[...new Set([preview.category, ...(preview.tags ?? [])].filter(Boolean))].map((tag) => <Tag key={tag}>{tag}</Tag>)}
-                </Space>
-                <Button
-                  icon={<ReadOutlined />}
-                  href={`https://fanqienovel.com/page/${encodeURIComponent(preview.book_id)}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >在番茄阅读</Button>
-              </div>
-            </div>
-            <div className="source-book-stats">
-              <div><strong>{fmtCount(preview.read_count)}</strong><span>人在读</span></div>
-              <div><strong>{fmtCount(preview.word_count)}</strong><span>字</span></div>
-              {book && <div><strong>{book.chapters.length.toLocaleString()}</strong><span>章</span></div>}
-            </div>
-            <section className="source-book-intro" aria-label="作品简介">
-              <Title level={5}>作品简介</Title>
-              {!preview.abstract && loadingBook ? <Skeleton active title={false} paragraph={{ rows: 4 }} /> : (
-                <Paragraph className="source-book-abstract">{preview.abstract?.trim() || '暂无简介'}</Paragraph>
-              )}
-            </section>
-            {preview.last_chapter_title && (
-              <div className="source-book-latest"><Text type="secondary">最新章节</Text><Text>{preview.last_chapter_title}</Text></div>
-            )}
-          </>
-        )}
-        {loadingBook && <div className="source-book-loading"><Spin size="small" /><Text type="secondary">正在加载目录…</Text></div>}
-        {bookError && selectedBook && (
-          <Alert
-            type="error"
-            showIcon
-            message="暂时无法打开完整详情"
-            action={<Button size="small" onClick={() => openBook(selectedBook)}>重试</Button>}
-          />
-        )}
-        {book && (
-          <Collapse
-            className="source-chapter-picker"
-            items={[{ key: book.book.book_id, label: <Space><BookOutlined />选择章节研读</Space>, children: (
-            <div>
-              <div style={{ marginTop: 8 }}>
-                <Radio.Group
-                  value={preset}
-                  onChange={(e) => setPreset(e.target.value)}
-                  optionType="button"
-                  buttonStyle="solid"
-                  size="small"
-                >
-                  <Radio.Button value="first">开篇若干章</Radio.Button>
-                  <Radio.Button value="volume">指定卷</Radio.Button>
-                  <Radio.Button value="all">整本</Radio.Button>
-                </Radio.Group>
-              </div>
-
-              <div style={{ marginTop: 12 }}>
-                {preset === 'first' && (
-                  <Space>
-                    <Text style={{ fontSize: 13 }}>取前</Text>
-                    <InputNumber
-                      size="small" min={1} max={200}
-                      value={count} onChange={(v) => setCount(v ?? 12)}
-                      style={{ width: 90 }} addonAfter="章"
-                    />
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      研究开篇时不用先请求整本
-                    </Text>
-                  </Space>
-                )}
-
-                {preset === 'volume' && (
-                  <Space wrap>
-                    <Text style={{ fontSize: 13 }}>选择卷</Text>
-                    <Radio.Group
-                      value={volume}
-                      onChange={(e) => setVolume(e.target.value)}
-                      size="small"
-                    >
-                      {book.volumes.map((v) => (
-                        <Radio.Button key={v.name} value={v.name}>
-                          {v.name}（{v.count}）
-                        </Radio.Button>
-                      ))}
-                    </Radio.Group>
-                  </Space>
-                )}
-
-                {preset === 'all' && (
-                  <Alert
-                    type="warning"
-                    showIcon
-                    message={`将抓取全部 ${book.chapters.length} 章`}
-                    description={
-                      <Text style={{ fontSize: 12 }}>
-                        按当前间隔约需 {Math.ceil(book.chapters.length * interval / 60)} 分钟。
-                        中途可取消；中断后可重新发起，已抓到的章不会重复请求。
-                      </Text>
-                    }
-                  />
-                )}
-              </div>
-
-              <div className="source-picker-actions">
-                <Space size={8}>
-                  <Text type="secondary">请求间隔</Text>
-                  <InputNumber
-                    aria-label="章节请求间隔"
-                    size="small" min={0.2} max={10} step={0.2}
-                    value={interval} onChange={(value) => setInterval(value ?? 1.2)}
-                    style={{ width: 90 }} addonAfter="s"
-                  />
-                </Space>
-                <Button
-                  type="primary"
-                  icon={<CloudDownloadOutlined />}
-                  onClick={createTask}
-                  disabled={preset === 'volume' && !volume}
-                >
-                  获取所选章节
-                </Button>
-              </div>
-            </div>
-            ) }]}
-          />
-        )}
-      </Drawer>
 
       {/* ---------- 任务进度 ---------- */}
       {task && (
@@ -1333,7 +761,7 @@ export default function Source() {
                     <Space wrap>
                       <Button
                         size="small"
-                        icon={<RightOutlined />}
+                        icon={<ArrowLeftOutlined rotate={-90} />}
                         onClick={() => navigate('/?view=book-import')}
                       >
                         去拆书模块确认导入
