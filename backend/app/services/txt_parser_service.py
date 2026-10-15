@@ -44,6 +44,29 @@ class TxtParserService:
         normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
         return normalized.strip()
 
+    # 取源 TXT（fanqie_source.results_to_txt）在正文后附加的
+    # 抓取说明区，用成对标记包起来，切分前整段剥掉。
+    # 不剥的话，未抓取章的标题清单（几百行「第N章 …」）会被
+    # 章节切分器当成几百个空章节 —— 实测 30 章被切成 291 章，
+    # 拆书 AI 的分析对象全错。
+    _APPENDIX_BEGIN_RE = re.compile(r"^\s*〖来源附录开始〗\s*$", re.MULTILINE)
+    _APPENDIX_END_RE = re.compile(r"^\s*〖来源附录结束〗\s*$", re.MULTILINE)
+
+    def strip_source_appendix(self, text: str) -> str:
+        """剥掉取源 TXT 的来源附录区（成对标记之间的部分）。
+
+        - 有成对标记：去掉两标记间（含标记）的全部内容
+        - 只有开始标记：去掉开始标记到文末
+        - 都没有：原样返回
+        """
+        m_begin = self._APPENDIX_BEGIN_RE.search(text)
+        if not m_begin:
+            return text
+        m_end = self._APPENDIX_END_RE.search(text, m_begin.end())
+        if m_end:
+            return (text[:m_begin.start()] + text[m_end.end():]).strip()
+        return text[:m_begin.start()].strip()
+
     def split_chapters(self, text: str) -> list[dict]:
         """
         章节切分（规则优先，失败兜底）
@@ -127,6 +150,22 @@ class TxtParserService:
             return False
         if re.search(r"[，。！？；：,.!?;:]", line):
             return False
+
+        # 正文短行防误判。小说（尤其网文/剧本式写法）有大量
+        # 独立的短行正文：拟声词（轰隆——）、引语（“父皇——”）、
+        # 破折号收尾的气口行。这些行前后常有空行，长度也短，
+        # 但它们是**正文**不是标题 —— 被误判成标题会把正文切碎
+        # 成几十个假章节，后续空章让拆书管线崩（NoneType.strip）。
+        # 规则：含破折号收尾、成对/单个中文引号、拟声结构的行
+        # 一律不当标题。
+        if line.endswith("——") or line.endswith("…") or "……" in line:
+            return False
+        if "“" in line or "”" in line or "「" in line or "」" in line:
+            return False
+        if re.fullmatch(r"[\u4e00-\u9fa5]{1,6}(——|!|！)?", line) and not re.match(r"^第", line):
+            # 纯中文 1-6 字短词：多为场景切换提示（“三日后。”带了句号
+            # 已在上面被排除），但也可能是拟声词。只保留带数字章号的。
+            pass  # 不拦：留这类当弱标题的候选，靠前后空行约束
 
         prev_blank = idx == 0 or not lines[idx - 1].strip()
         next_blank = idx == len(lines) - 1 or not lines[idx + 1].strip()

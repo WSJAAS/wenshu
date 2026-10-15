@@ -695,6 +695,31 @@ async def _run_task(
                     task.imported_at = datetime.utcnow()
                     logger.info("取源任务 %s 已自动交接拆书：%s",
                                 task_id, res["import_task_id"])
+
+                    # 交接成功 ≠ 拆书成功。create_task 只是登记，
+                    # 真正的解析在后台异步跑，可能失败（实测崩在
+                    # AI 后处理：'NoneType' object has no attribute 'strip'）。
+                    # 那时 import_status 停在 handed，用户端就是
+                    # 「交了之后没反应」。这里盯到拆书出结果为止，
+                    # 把终态如实写回取源任务。
+                    bi_status = await _await_book_import_result(
+                        res["import_task_id"], task.user_id,
+                    )
+                    if bi_status is not None:
+                        if bi_status.status == "failed":
+                            task.import_status = "failed"
+                            task.import_message = (
+                                f"拆书解析失败：{bi_status.error or bi_status.message or '未知原因'}"
+                            )[:500]
+                            logger.warning(
+                                "取源任务 %s 的拆书任务 %s 解析失败：%s",
+                                task_id, res["import_task_id"], bi_status.error,
+                            )
+                        else:
+                            task.import_message = (
+                                task.import_message
+                                + f" 拆书解析完成（{bi_status.progress}%）"
+                            )
                 except Exception as e:
                     task.import_status = "failed"
                     task.import_message = f"自动交接失败：{type(e).__name__}: {e}"[:500]
@@ -899,6 +924,46 @@ async def cancel_source_task(
 # ============================================================
 #  与拆书导入衔接
 # ============================================================
+async def _await_book_import_result(
+    bi_task_id: str,
+    user_id: str,
+    *,
+    timeout_seconds: float = 600.0,
+    poll_interval: float = 2.0,
+):
+    """等拆书任务出终态，返回其状态响应；超时返回 None。
+
+    拆书解析在后台异步跑。交接（create_task）成功只说明登记上了，
+    之后管线可能失败 —— 比如实测的 AI 后处理崩溃
+    （'NoneType' object has no attribute 'strip'）。
+    不盯结果的话，取源任务的 import_status 停在 handed，
+    用户端看到的就是「交了之后没反应」。
+
+    只读状态不改数据；拿不到任务（服务重启丢内存态）也返回 None，
+    不影响交接本身的成功记录。
+    """
+    from app.services.book_import_service import book_import_service
+
+    deadline = asyncio.get_event_loop().time() + timeout_seconds
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            status = await book_import_service.get_task_status(
+                task_id=bi_task_id, user_id=user_id,
+            )
+        except HTTPException:
+            # 任务不存在（内存态丢失，如服务重启）—— 不再等
+            return None
+        except Exception:
+            await asyncio.sleep(poll_interval)
+            continue
+
+        if status.status in ("completed", "failed", "cancelled"):
+            return status
+        await asyncio.sleep(poll_interval)
+
+    return None
+
+
 async def _hand_to_book_import(
     t: SourceTask,
     user_id: str,

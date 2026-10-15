@@ -909,6 +909,42 @@ export interface SourceSelection {
   item_ids: string[];
 }
 
+// ============================================================
+//  整本下载（外部下载器）
+// ============================================================
+
+/** 外部下载器的章节进度 */
+export interface ExtDownloadProgress {
+  /** 目录里的总章数 */
+  chapter_total: number;
+  /** 已落盘的章数 */
+  saved_chapters: number;
+  /** 已完成的批次数 */
+  group_done: number;
+  /** 总批次数 */
+  group_total: number;
+}
+
+/** 外部下载器的任务快照。state: queued / running / done / error */
+export interface ExtDownloadJob {
+  id?: number;
+  state?: string;
+  title?: string;
+  author?: string;
+  /** state === 'error' 时的原因 */
+  error?: string;
+  progress?: ExtDownloadProgress;
+}
+
+/** GET /api/ext-download/status/{job_id} 的返回 */
+export interface ExtDownloadStatus {
+  job: ExtDownloadJob;
+  /** 打包产物的路径，未完成时为 null */
+  epub_path?: string | null;
+  /** 打包产物的字节数 */
+  epub_bytes?: number | null;
+}
+
 // 向导API响应类型
 export interface GenerateCharactersResponse {
   characters: Character[];

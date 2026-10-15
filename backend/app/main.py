@@ -265,7 +265,7 @@ from app.api import (
     mcp_plugins, admin, inspiration, prompt_templates,
     changelog, careers, foreshadows, prompt_workshop, book_import,
     project_covers, project_agent, tasks, skills, announcements,
-    polish, source,
+    polish, source, ext_download,
 )
 
 app.include_router(auth.router, prefix="/api")
@@ -296,6 +296,7 @@ app.include_router(prompt_workshop.router, prefix="/api")  # 提示词工坊API
 app.include_router(book_import.router, prefix="/api")  # 拆书导入API
 app.include_router(tasks.router, prefix="/api")  # 后台任务API
 app.include_router(announcements.router, prefix="/api")  # 公告API
+app.include_router(ext_download.router, prefix="/api")  # 整本下载API（外部下载器，可关闭）
 app.include_router(polish.router, prefix="/api")  # 文本重塑API（去AI味/体检/采纳/回退）
 app.include_router(source.router, prefix="/api")  # 书源API（榜单/详情/取源，可关闭）
 

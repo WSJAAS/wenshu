@@ -211,6 +211,29 @@ class Settings(BaseSettings):
     FANQIE_INTERVAL: float = 1.2
     # 单次任务最多抓多少章，防止误操作拉起整本
     FANQIE_MAX_CHAPTERS_PER_TASK: int = 3000
+
+    # ============================================================
+    #  外部整本下载器（可选，与书源共用 FANQIE_ENABLED 开关）
+    #
+    #  书源那条路是后端逐章直连，未登录时锁定章只有试读片段；
+    #  整本几百章这种需求交给专门的外部工具做（Rust，常驻 HTTP 服务），
+    #  它能拿到全文并打包成 EPUB。这三项只是「工具在哪、数据放哪、怎么连」。
+    #
+    #  注意 PROJECT_ROOT 是 backend/（`__file__` 往上两级），而本仓库把
+    #  runtime/ 放在仓库根 —— 所以这里必须再往上一层，路径才落对地方。
+    # ============================================================
+    # 可执行文件路径
+    EXT_DOWNLOADER_PATH: str = str(
+        PROJECT_ROOT.parent / "runtime" / "tools" / "tnd" / "TomatoNovelDownloader.exe"
+    )
+    # 数据目录。**同时也是子进程的工作目录** —— 该工具在 save_path 为空时
+    # 把产出文件写到进程 CWD 下，把它定位到这里，产出才不会散落到代码目录里。
+    EXT_DOWNLOADER_DATA_DIR: str = str(
+        PROJECT_ROOT.parent / "runtime" / "data" / "ext_downloader"
+    )
+    # 服务地址。工具默认监听 127.0.0.1:18423（可用 TOMATO_WEB_ADDR 改），
+    # 若本机已有实例在别的端口，这里改一下即可复用。
+    EXT_DOWNLOADER_ADDR: str = "http://127.0.0.1:18423"
     
     class Config:
         env_file = ".env"

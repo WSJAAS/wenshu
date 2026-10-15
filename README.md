@@ -152,6 +152,12 @@ wenshu/
 .\.venv\Scripts\python.exe tools\accept_e2e.py
 ```
 
+书源与拆书衔接的验收（交接 → 抓取 → 自动交接 → 拆书出预览）：
+
+```powershell
+.\.venv\Scripts\python.exe tools\accept_source_to_import.py
+```
+
 ---
 
 ## 许可证

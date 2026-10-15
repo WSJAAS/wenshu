@@ -290,7 +290,150 @@
 
 ---
 
-## 七、恢复办法
+## 八、交接后拆书静默失败的修复（2026-10-14 晚）
+
+修改日期：**2026-10-14**
+
+用户现象：浏览器脚本交接后「用户端没有反应」。实测复盘（wenshu.log，
+UTC 时间 +8 即北京时间）：
+
+- 22:12 后台服务启动（`--log-level warning`）
+- 22:13 交接《我不是戏神》：抓取成功（完整 10/30 章），
+  自动交接成功，**拆书管线在 AI suggestion 成功后 35ms 崩溃**
+  （`'NoneType' object has no attribute 'strip'`），
+  拆书任务静默 failed，项目从未创建
+- 22:15 交接《父皇他两辈子都在装》：成功建项目
+
+### 8.1 崩溃根因：取源 TXT 的附录被当成章节
+
+`results_to_txt` 把未抓取章的清单（几百行「第N章 …（not_fetched）」）
+附在正文后。拆书的章节切分器（`STRONG_CHAPTER_PATTERNS` +
+弱标题启发）把这些行识别为章节标题：30 章被切成 291 章，
+其中 60+ 个空章节。空章的 `summary` 为 None，
+`_build_fallback_outline_structure` 里
+`(chapter.summary or self._build_summary(...)).strip()` 在两者皆空时
+对 None 调 `.strip()` 崩溃。
+
+### 8.2 修复一：附录隔离（fanqie_source.py）
+
+`results_to_txt` 的抓取说明区改用成对标记
+`〖来源附录开始〗` / `〖来源附录结束〗` 包裹。
+
+### 8.3 修复二：切分前剥附录（txt_parser_service.py）
+
+新增 `strip_source_appendix()`：按成对标记整段剥掉附录区，
+没有标记的旧 TXT 原样返回（向后兼容）。
+`_run_pipeline` 在 `clean_text` 后调用它。
+
+同时收紧 `_is_weak_heading`：以破折号、省略号、中文引号开头/收尾的
+正文短行（拟声词「轰隆——」、引语「“父皇——”」）不再判为章节标题。
+实测《我不是戏神》从 91 章（仍含大量假章节）收敛到 38 章。
+
+### 8.4 修复三：空章兜底（book_import_service.py）
+
+`_build_fallback_outline_structure` 对空章返回占位摘要，
+不再对 None 调 `.strip()`；`_build_summary` 对纯空白内容返回 None
+（原语义），由调用方兜底。
+
+### 8.5 修复四：拆书终态回写取源任务（api/source.py）
+
+新增 `_await_book_import_result()`：自动交接后盯拆书任务到终态
+（默认 600s），失败时把 `import_status` 置 `failed`、
+`import_message` 写明原因。此前 `import_status` 停在 `handed`，
+拆书内部崩溃用户完全看不到 —— 这就是「没有反应」的直接表现。
+
+### 8.6 修复五：日志保留异常堆栈（logger.py）
+
+`UvicornFormatter.format()` 只取 `record.getMessage()`，
+`exc_info` 堆栈被丢弃，ERROR 行后永远没有 Traceback
+（本次排障实测绕了远路）。现在 format 时附带堆栈文本。
+
+### 8.7 验证
+
+- 用任务 9e68bfee（30 章原崩溃数据）重放交接：
+  拆书 completed，38 章 / 38 大纲，AI 全程使用
+- 6 章免费范围重放：`import_message` 正确写回
+  「抓取完成后自动交接：完整 6 章，共 14536 字 拆书解析完成（100%）」
+- 全部 8 个验收脚本 PASS：
+  accept_source_to_import / accept_handover / accept_e2e /
+  accept_isolation / accept_truncation / accept_ai_visibility /
+  accept_frontend_source / accept_source_e2e
+
+---
+
+## 十、整本下载（外部下载器集成）
+
+修改日期：**2026-10-15**
+
+### 背景
+
+番茄小说网页端对未登录访问只开放每本书前 10 章全文，其后章节
+服务端直接截断为约 200 字符试读（实测《惹金枝》第 11 章 171 字，
+申报 2088 字）。锁定章全文只对 APP 端免费开放，网页端需要 SVIP。
+
+书源模块的直连路径受此限制；浏览器代抓通道也拿不到（服务端
+对无 SVIP 登录态一律截断）。整本全文因此交给专门的外部工具：
+zhongbai2333/Tomato-Novel-Downloader（Rust，MIT），
+它通过官方 App 接口抓取，可拿到全部章节全文。
+
+### 新增文件
+
+- `backend/app/services/ext_downloader.py` —— 外部下载器封装：
+  进程拉起/复用（探活 + 双重检查锁）、任务提交、进度查询、
+  EPUB 定位、EPUB→TXT 转换
+- `backend/app/api/ext_download.py` —— 三条路由：
+  `POST /api/ext-download/start`（发起）、
+  `GET /api/ext-download/status/{job_id}`（进度）、
+  `GET /api/ext-download/result/{job_id}`（导出 TXT）
+
+### 改动文件
+
+- `backend/app/config.py`：新增 `EXT_DOWNLOADER_PATH` /
+  `EXT_DOWNLOADER_DATA_DIR` / `EXT_DOWNLOADER_ADDR` 三项配置。
+  注意默认值经 `PROJECT_ROOT.parent` 定位（runtime 在仓库根，
+  而 PROJECT_ROOT 是 backend/）
+- `backend/app/main.py`：注册 ext_download 路由
+- `frontend/src/types/index.ts`：`ExtDownloadProgress` /
+  `ExtDownloadJob` / `ExtDownloadStatus` 类型
+- `frontend/src/services/api.ts`：`extDownloadApi`（start / getStatus / resultUrl）
+- `frontend/src/pages/Source.tsx`：在线书源页新增「整本下载」卡片，
+  含 ID/链接解析、任务发起、2 秒轮询、进度条、TXT 导出按钮
+
+### 外部工具
+
+- 可执行文件：`runtime/tools/tnd/TomatoNovelDownloader.exe`（v2.4.15，
+  Windows x64，GitHub Release 下载，未入 git）
+- 以 `--server` 模式常驻 `127.0.0.1:18423`，输出 EPUB 落在
+  `runtime/data/ext_downloader/`（子进程 CWD 即输出目录）
+- 与书源共用 `FANQIE_ENABLED` 开关：关掉它两者一起消失
+
+### 关键设计
+
+1. **复用优先**：已运行的实例直接复用（用户可能正用它下载别的书），
+   探活用业务接口而非 TCP —— 端口被占但服务没起来时只有真发请求才分得清。
+2. **子进程 CWD = 输出目录**：该工具 `save_path` 为空时把产出写到
+   进程工作目录；实测改 config.yml 的 save_path 不可行（配置只在
+   启动时读一次），所以直接把 CWD 定到数据目录，产出不散落。
+3. **任务状态不落库**：状态由工具自持（内存 + done_retention_ms），
+   本模块只做薄封装，不制造第二份真相。
+4. **EPUB→TXT 在服务端做**：按 `chapter_(\d+)` 数字排序（字典序会把
+   第 10 章排到第 2 章前）；先删 `<head>`/`<style>`/`<script>` 再去标签
+   （否则 CSS/JS 源码进正文）；章节标题精确去重（`<head><title>` 与
+   `<body><h1>` 各打一遍）。
+5. **中文文件名走 RFC 5987**：`filename*=UTF-8''<百分号编码>`，
+   ASCII 兜底名 —— HTTP 头只能装 latin-1，直接写中文会抛
+   `UnicodeEncodeError`。
+
+### 实测（accept_ext_download.py，全 PASS）
+
+- 《惹金枝》550 章整本：56 秒跑完，550/550 全文
+- 导出 TXT 1,201,672 字；第 11 章 2097 字（对照未登录网页端 171 字）
+- EPUB 2.1 MB 落在 `runtime/data/ext_downloader/`
+- 重复发起正常排队；空 book_id 返回 400；未完成导出返回 409
+
+---
+
+## 十一、恢复办法
 
 本工程保留了对上游的引用方式，如需比对原始实现，
 可在 `docs/上游对齐.md` 中查到各文件的来源与差异摘要。

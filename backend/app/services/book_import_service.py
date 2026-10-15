@@ -636,6 +636,10 @@ class BookImportService:
 
             text, encoding = txt_parser_service.decode_bytes(file_content)
             cleaned = txt_parser_service.clean_text(text)
+            # 取源交接来的 TXT 尾部带「来源附录」（未抓取章清单）。
+            # 附录里有几百行「第N章 …（not_fetched）」标题，
+            # 不剥掉会被章节切分器识别成几百个空章节。
+            cleaned = txt_parser_service.strip_source_appendix(cleaned)
 
             self._set_task_state(task, status="running", progress=10, message=f"文本清洗完成（编码：{encoding}）")
             self._check_cancelled(task)
@@ -1473,7 +1477,12 @@ class BookImportService:
         }
 
     def _build_fallback_outline_structure(self, chapter: BookImportChapter) -> dict[str, Any]:
-        summary = (chapter.summary or self._build_summary(chapter.content or "")).strip()
+        # 空章（如取源 TXT 里的空片段）会让 summary 为 None，
+        # 直接 .strip() 会崩 —— 实测一条链路：
+        # 取源自动交接 → 拆书解析 → AI 成功后此处 NoneType.strip()
+        # → 拆书任务静默 failed，用户端表现为「交了没反应」。
+        raw_summary = chapter.summary or self._build_summary(chapter.content or "")
+        summary = (raw_summary or "").strip()
         if not summary:
             summary = "本章围绕主要人物与核心冲突推进剧情。"
 
@@ -2263,7 +2272,10 @@ class BookImportService:
         return created
 
     def _build_summary(self, content: str, max_len: int = 120) -> Optional[str]:
-        if not content:
+        # 返回 None 是合法结果（空内容），调用方必须处理；
+        # 这里保持原语义，但在空内容时返回空串会破坏旧调用方
+        # 对 None 的判断，所以维持 None，由调用方兜底。
+        if not content or not content.strip():
             return None
         normalized = re.sub(r"\s+", " ", content).strip()
         if len(normalized) <= max_len:

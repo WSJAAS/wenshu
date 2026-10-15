@@ -1299,7 +1299,15 @@ def results_to_txt(
     body = "\n".join(parts).strip()
 
     if include_missing_note:
-        note: list[str] = ["", "=" * 40, "【抓取说明】"]
+        # 附录与正文用成对标记隔开：拆书管线（txt_parser_service
+        # .strip_source_appendix）会在切分前把附录整段剥掉，
+        # 未抓取章的标题清单就不会被章节切分器当成几百个空章节。
+        note: list[str] = [
+            "",
+            "〖来源附录开始〗",
+            "=" * 40,
+            "【抓取说明】",
+        ]
 
         if preview_orders:
             total_chars = ok_chars + preview_chars
@@ -1328,6 +1336,7 @@ def results_to_txt(
             if len(missing) > 200:
                 note.append(f"... 另有 {len(missing) - 200} 章未列出")
 
+        note.extend(["=" * 40, "〖来源附录结束〗"])
         body = body + "\n" + "\n".join(note)
 
     return body

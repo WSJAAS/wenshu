@@ -144,6 +144,17 @@ class UvicornFormatter(logging.Formatter):
         timestamp = self.formatTime(record, self.datefmt)
         
         message = _truncate_text(record.getMessage(), self.max_message_chars)
+
+        # 异常堆栈必须保留：getMessage() 不含 exc_info，
+        # 丢掉的话 ERROR 行后面永远没有 Traceback，
+        # 排障时只能看到一句 'NoneType' has no attribute 'strip'
+        # 而不知道崩在哪一行（本次排障实测踩坑）。
+        if record.exc_info and record.exc_info[0] is not None:
+            import traceback as _tb
+            tb_text = "".join(_tb.format_exception(*record.exc_info))
+            # 堆栈也截断，但给足空间：定位行号通常在前几行
+            message = f"{message}\n{_truncate_text(tb_text, max(self.max_message_chars, 8000))}"
+
         # Uvicorn风格格式: INFO:     [2024-01-01 12:00:00] module_name - message [request_id]
         # 注意：INFO后面有5个空格，保持对齐
         return f"{colored_level}:     [{timestamp}] {record.name}{request_id_str} - {message}"

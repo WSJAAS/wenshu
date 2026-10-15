@@ -41,6 +41,7 @@ import type {
   SourceTask,
   SourceTaskChaptersResponse,
   SourceSelection,
+  ExtDownloadStatus,
   GenerateCharactersResponse,
   GenerateOutlineResponse,
   Settings,
@@ -1149,6 +1150,31 @@ export const sourceApi = {
   /** 最近的交接记录 */
   handoverSummary: (limit = 10) =>
     api.get<unknown, SourceTask[]>(`/source/handover/summary?limit=${limit}`),
+};
+
+/**
+ * 整本下载 API（外部下载器）。
+ *
+ * 与 sourceApi 的取源任务分开：这里交给外部下载器整本抓取（含锁定章全文），
+ * 完成后打包，再导出 TXT 交给拆书导入。
+ */
+export const extDownloadApi = {
+  /** 发起整本下载，返回 job_id */
+  start: (bookId: string, title?: string, author?: string) =>
+    api.post<unknown, { ok: boolean; job_id: number }>('/ext-download/start', {
+      book_id: bookId,
+      title,
+      author,
+    }),
+
+  /** 查询任务进度；state 可能为 queued / running / done / error */
+  getStatus: (jobId: number) =>
+    api.get<unknown, ExtDownloadStatus>(`/ext-download/status/${jobId}`),
+
+  /** 导出 TXT 的下载地址（直接 window.open，不走 axios） */
+  resultUrl: (jobId: number, title?: string) =>
+    `/api/ext-download/result/${jobId}` +
+    (title ? `?title=${encodeURIComponent(title)}` : ''),
 };
 
 export const inspirationApi = {
