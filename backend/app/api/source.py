@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import Base, get_db
 from app.logger import get_logger
+from app.utils.error_detail import safe_detail
 from app.services.fanqie_source import (
     FREE_CHAPTER_COUNT,
     BatchFetcher, BlockedError, BookInfo, ChapterContent, ChapterRef,
@@ -424,7 +425,7 @@ async def get_rank(
     except BlockedError as e:
         raise HTTPException(status_code=429, detail=f"被风控拦截：{e}")
     except FanqieError as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        raise HTTPException(status_code=502, detail=safe_detail(e, context="获取榜单失败", public="获取榜单失败，书源暂时不可用"))
 
     # 榜单页书名可能带混淆，补取详情页拿干净的
     if enrich:
@@ -437,7 +438,11 @@ async def get_rank(
                 # 单本补取失败不影响整体。此时书名只能用榜单页的（可能带混淆），
                 # 明确标记出来，避免把乱码当正常书名展示。
                 it["enriched"] = False
-                it["enrich_error"] = str(e)[:120]
+                # 该字段会随 /rank 响应回给客户端，不能放异常原文
+                # （fetch_book 抛出的 FanqieError 里带完整 URL）。
+                it["enrich_error"] = safe_detail(
+                    e, context="榜单补取书籍详情失败", public="详情补取失败"
+                )
                 # 解析层已经填好了 title 与 title_may_be_garbled，这里保持原样。
                 # 早期实现在此处重算，反而可能把解析层的判定覆盖掉。
                 if not it.get("title"):
@@ -488,10 +493,29 @@ async def get_rank(
     }
 
 
+@router.get("/search", summary="按书名或作者搜索书籍")
+async def search_books(query: str = Query(min_length=1, max_length=200)):
+    _require_enabled()
+    keyword = query.strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="请输入书名或作者")
+    from app.services.ext_downloader import ext_downloader_service
+
+    try:
+        items = await asyncio.to_thread(ext_downloader_service.search_books, keyword)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=safe_detail(exc, context="搜索书籍失败", public="书名搜索暂时不可用，请稍后重试或粘贴书籍链接"),
+        )
+    return {"items": items}
+
+
 @router.get("/book/{book_id}", summary="书籍详情与目录")
 async def get_book(
     book_id: str,
     interval: float = Query(default=1.2, ge=0.2, le=10.0),
+    from_reader: bool = Query(default=False, description="是否为阅读页的章节 ID"),
 ):
     """取书籍详情与完整章节目录。"""
     _require_enabled()
@@ -499,11 +523,15 @@ async def get_book(
     client = FanqieClient(interval=interval)
 
     try:
+        if from_reader:
+            bid = await asyncio.to_thread(client.resolve_book_by_item, bid)
+            if not bid:
+                raise FanqieError("无法找到该章节所属书籍")
         book, chapters = await asyncio.to_thread(client.fetch_book, bid)
     except BlockedError as e:
         raise HTTPException(status_code=429, detail=f"被风控拦截：{e}")
     except FanqieError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=safe_detail(e, context="获取书籍详情失败", public="获取书籍详情失败，请确认书籍 ID 或稍后重试"))
 
     vols: dict[str, int] = {}
     for c in chapters:
@@ -546,7 +574,7 @@ async def create_source_task(
     except BlockedError as e:
         raise HTTPException(status_code=429, detail=f"被风控拦截：{e}")
     except FanqieError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=safe_detail(e, context="创建取源任务失败", public="创建取源任务失败，未能获取该书籍目录"))
 
     picked = _select_chapters(chapters, payload.selection)
 
@@ -1138,7 +1166,7 @@ async def handover_from_browser(
     except BlockedError as e:
         raise HTTPException(status_code=429, detail=f"被风控拦截：{e}")
     except FanqieError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=safe_detail(e, context="接收书籍信息失败", public="接收书籍信息失败，未能获取该书详情"))
 
     # Cookie 情况：决定锁定章能否取到全文
     ck = cookie_status()

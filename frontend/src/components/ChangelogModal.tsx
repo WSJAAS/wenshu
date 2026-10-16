@@ -157,10 +157,10 @@ export default function ChangelogModal({ visible, onClose }: ChangelogModalProps
         <div style={{
           padding: '16px',
           marginBottom: '16px',
-          background: 'var(--color-error-bg)',
-          border: '1px solid var(--color-error-border)',
+          background: 'var(--ant-color-error-bg)',
+          border: '1px solid var(--ant-color-error-border)',
           borderRadius: '4px',
-          color: 'var(--color-error)',
+          color: 'var(--ant-color-error)',
         }}>
           {error}
         </div>
@@ -182,10 +182,10 @@ export default function ChangelogModal({ visible, onClose }: ChangelogModalProps
                 <div style={{
                   fontSize: '16px',
                   fontWeight: 600,
-                  color: 'var(--color-primary)',
+                  color: 'var(--ant-color-primary)',
                   marginBottom: '16px',
                   paddingBottom: '8px',
-                  borderBottom: '2px solid var(--color-border-secondary)',
+                  borderBottom: '2px solid var(--ant-color-border-secondary)',
                 }}>
                   <ClockCircleOutlined style={{ marginRight: '8px' }} />
                   {formatDate(date)}
@@ -203,8 +203,8 @@ export default function ChangelogModal({ visible, onClose }: ChangelogModalProps
                             width: '24px',
                             height: '24px',
                             borderRadius: '50%',
-                            background: 'var(--color-bg-container)',
-                            border: `2px solid ${config.color === 'default' ? 'var(--color-border)' : config.color}`,
+                            background: 'var(--ant-color-bg-container)',
+                            border: `2px solid ${config.color === 'default' ? 'var(--ant-color-border)' : config.color}`,
                             display: 'flex',
                             alignItems: 'center',
                             justifyContent: 'center',
@@ -222,7 +222,7 @@ export default function ChangelogModal({ visible, onClose }: ChangelogModalProps
                             {entry.scope && (
                               <Tag color="blue">{entry.scope}</Tag>
                             )}
-                            <span style={{ color: 'var(--color-text-tertiary)', fontSize: '12px' }}>
+                            <span style={{ color: 'var(--ant-color-text-secondary)', fontSize: '12px' }}>
                               {formatTime(entry.date)}
                             </span>
                           </Space>
@@ -231,7 +231,7 @@ export default function ChangelogModal({ visible, onClose }: ChangelogModalProps
                             marginTop: '8px',
                             fontSize: '14px',
                             lineHeight: '1.6',
-                            color: 'var(--color-text-primary)',
+                            color: 'var(--ant-color-text)',
                           }}>
                             {entry.message}
                           </div>
@@ -240,7 +240,7 @@ export default function ChangelogModal({ visible, onClose }: ChangelogModalProps
                             {entry.author.avatar && (
                               <Avatar size="small" src={entry.author.avatar} />
                             )}
-                            <span style={{ color: 'var(--color-text-secondary)', fontSize: '13px' }}>
+                            <span style={{ color: 'var(--ant-color-text-secondary)', fontSize: '13px' }}>
                               {entry.author.username || entry.author.name}
                             </span>
                             <a
@@ -279,7 +279,7 @@ export default function ChangelogModal({ visible, onClose }: ChangelogModalProps
             !hasMore && changelog.length > 0 && (
               <div style={{
                 textAlign: 'center',
-                color: 'var(--color-text-tertiary)',
+                color: 'var(--ant-color-text-secondary)',
                 padding: '16px 0',
                 fontSize: '14px',
               }}>
@@ -293,11 +293,11 @@ export default function ChangelogModal({ visible, onClose }: ChangelogModalProps
       <div style={{
         marginTop: '24px',
         padding: '12px',
-        background: 'var(--color-info-bg)',
+        background: 'var(--ant-color-info-bg)',
         borderRadius: '4px',
-        border: '1px solid var(--color-info-border)',
+        border: '1px solid var(--ant-color-info-border)',
         fontSize: '13px',
-        color: 'var(--color-primary)',
+        color: 'var(--ant-color-primary)',
       }}>
         💡 提示：每次打开窗口时自动获取最新更新日志，数据来源于 GitHub 提交历史
       </div>

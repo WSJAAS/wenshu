@@ -187,6 +187,8 @@ async def reset_user_password(
         
         return response_data
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,

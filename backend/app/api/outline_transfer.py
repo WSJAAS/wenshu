@@ -110,6 +110,8 @@ async def import_outlines(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"导入文件验证失败：{exc}") from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("大纲导入失败: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="大纲导入失败，请稍后重试") from exc

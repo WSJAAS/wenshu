@@ -212,6 +212,13 @@ export class SSEPostClient {
           }
         }
 
+        // 兜底落地：流已 EOF，但在此期间没有收到任何终态事件（done 已 resolve / error 已 reject）。
+        // 触发场景：服务端进程重启或崩溃、反向代理超时切断、中间设备优雅关闭连接。
+        // 此前这里直接落入 finally，Promise 既不 resolve 也不 reject，调用方的 await 永久挂起，
+        // isGenerating / loading 等状态再也无法复位。若前述终态事件已出现，Promise 已 settle，
+        // 此处调用是 no-op，因此不会误伤正常完成的请求。
+        reject(new Error('SSE 流在收到完成信号前已结束（连接被中断或服务端异常）'));
+
       } catch (error: any) {
         if (error.name === 'AbortError') {
           console.log('请求已取消');

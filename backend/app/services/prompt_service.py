@@ -2606,6 +2606,20 @@ class PromptService:
 ❌ 使用 markdown 或代码块
 </constraints>"""
 
+    # AI 去味改写提示词（/api/polish 模型路径）
+    AI_DENOISING = """你是一名资深中文小说编辑。请改写下面的文本，去除 AI 写作痕迹。
+
+要求：
+1. 把直白的情绪陈述改为具体可感的描写（动作、神态、环境、身体感受），例如「他感到十分疲惫」应改为「他眼皮沉得像灌了铅」这类。
+2. 删除套话与空洞的概括（如「五味杂陈」「内心充满了复杂的情绪」），用具体细节替代。
+3. 严格保持原意、人称、叙事视角与情节信息不变：不删减情节、不新增情节、不改人物名。
+4. 保留对话原文不动（除非对话本身就是套话）。
+5. 只输出改写后的正文，不要输出任何说明、标题、前言或 markdown 标记。
+
+原文：
+{original_text}
+"""
+
     @staticmethod
     def format_prompt(template: str, **kwargs) -> str:
         """
@@ -2855,7 +2869,7 @@ class PromptService:
         template_content = getattr(cls, template_key, None)
         
         if template_content is None:
-            logger.warning(f"⚠️ 未找到系统默认模板: {template_key}")
+            raise ValueError(f"系统模板不存在: {template_key}")
         
         return template_content
     
@@ -3112,6 +3126,12 @@ class PromptService:
                 "category": "灵感模式",
                 "description": "根据用户提供的部分信息智能补全完整的小说方案",
                 "parameters": ["existing"]
+            },
+            "AI_DENOISING": {
+                "name": "AI 去味改写",
+                "category": "文本重塑",
+                "description": "模型改写：去除 AI 写作痕迹，把直白陈述改为具体可感描写",
+                "parameters": ["original_text"]
             }
         }
         

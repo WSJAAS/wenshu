@@ -39,6 +39,26 @@ except ImportError:
 # 注意: 表结构应由 Alembic 管理
 from pathlib import Path
 
+# 日志脱敏实现：优先复用 app.config 的单一事实来源。
+# 本脚本是**引导脚本**（见上方 psycopg2 缺失时自动 pip install），
+# 首次部署时 app.config 依赖的 pydantic_settings / dotenv 可能尚未安装，
+# 因此 import 失败时退回本地等价实现，保证脚本仍能独立跑完引导流程。
+try:
+    from app.config import mask_database_url
+except Exception:  # pragma: no cover - 仅在引导环境缺少应用依赖时触发
+    import re as _re
+
+    _DB_URL_CREDENTIAL_RE = _re.compile(r"://([^:/@]+):([^@/]+)@")
+
+    def mask_database_url(url: object) -> str:
+        """把 DB URL 里的密码替换为 ***（与 app.config.mask_database_url 等价）。
+
+        postgresql+asyncpg://user:pass@host:5432/db
+          → postgresql+asyncpg://user:***@host:5432/db
+        无凭据段（如 sqlite+aiosqlite:///./data/wenshu.db）原样返回。
+        """
+        return _DB_URL_CREDENTIAL_RE.sub(r"://\1:***@", str(url or ""))
+
 # 设置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -270,7 +290,9 @@ class PostgreSQLSetup:
                     f.write(f"DATABASE_URL={database_url}\n")
             
             logger.info(f"✅ .env 文件已更新")
-            logger.info(f"   DATABASE_URL={database_url}")
+            # 脱敏后再打印：database_url 含明文密码，直接落日志会泄露。
+            # 真实连接串仍原样写入 .env（见上方三处 writelines/write）。
+            logger.info(f"   DATABASE_URL={mask_database_url(database_url)}")
             return True
             
         except Exception as e:

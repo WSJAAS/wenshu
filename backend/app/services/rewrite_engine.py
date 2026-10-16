@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -20,7 +21,11 @@ logger = get_logger(__name__)
 # engine/ 位于仓库根目录。
 # 本文件路径为 <root>/backend/app/services/rewrite_engine.py，
 # 因此向上四级（parents[3]）才是 <root>。
-ENGINE_DIR = Path(__file__).resolve().parents[3] / "engine"
+# 容器布局：Dockerfile 以 `COPY backend/ ./` + WORKDIR /app 落盘到
+# /app/app/services/rewrite_engine.py，parents[3] 解析为 /，
+# 与 `COPY engine/ /engine/` 对齐。可用 WENSHU_ENGINE_DIR 覆盖。
+ENGINE_DIR = Path(os.environ.get("WENSHU_ENGINE_DIR") or
+                  (Path(__file__).resolve().parents[3] / "engine"))
 
 
 def _ensure_engine_on_path() -> bool:

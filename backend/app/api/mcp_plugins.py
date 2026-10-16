@@ -660,6 +660,8 @@ async def test_plugin(
 
         return test_result
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"测试插件失败: {plugin.plugin_name}, 错误: {e}")
         plugin.status = "error"

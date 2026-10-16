@@ -1,6 +1,7 @@
 """统一日志配置模块 - Uvicorn风格"""
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -24,8 +25,193 @@ SENSITIVE_LOG_KEYS = {
 }
 
 
+# ============================================================
+#  敏感键名判定
+#
+#  旧实现是 `sensitive_key in lower_key` 的子串匹配：只要键名里
+#  出现 "auth" 就会被整体打码，导致 author / authority 这类正常
+#  业务字段被误伤，真实信息反而被掩盖。
+#
+#  现在改为三步：
+#    1) 键名归一化（apiKey / api-key / ApiKey / APIKey → api_key）
+#    2) 归一化后的精确匹配（SENSITIVE_LOG_KEYS + 显式补充表）
+#    3) 以分隔符为界的词根兜底（xxx_token / token_xxx 这类命名变体）
+#  子串匹配被彻底去掉，author 不再命中 auth。
+# ============================================================
+
+# 驼峰边界：小写/数字 后接大写，或 连续大写 后接「大写+小写」的首字母
+# 后者用于 APIKey → API_Key 这种连续大写前缀。
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _normalize_key(key: Any) -> str:
+    """把键名归一化为小写下划线形式：apiKey / api-key / ApiKey / APIKey → api_key"""
+    s = _CAMEL_BOUNDARY.sub("_", str(key))
+    return s.replace("-", "_").strip().lower()
+
+
+# 精确匹配集合（归一化后）
+_SENSITIVE_NORMALIZED: frozenset[str] = frozenset(_normalize_key(k) for k in SENSITIVE_LOG_KEYS)
+
+# 显式补充：SENSITIVE_LOG_KEYS 里只有 auth / authorization 这类泛化词，
+# 精确匹配后具体键名（apiKey、secret_key、session_token、xxx_password…）
+# 会整个漏掉，因此把这些常见凭据键名补成同一张精确表。
+_EXTRA_SENSITIVE: frozenset[str] = frozenset({
+    "auth",
+    "authorize",
+    "authorization",
+    "authenticate",
+    "authenticated",
+    "authed",
+    "authed_at",
+    "auth_at",
+    "api_key",
+    "apikey",
+    "api_secret",
+    "secret",
+    "secret_key",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "session_token",
+    "token",
+    "password",
+    "passwd",
+    "pwd",
+    "pass",
+    "passphrase",
+    "cookie",
+    "cookies",
+    "set_cookie",
+    "credential",
+    "credentials",
+    "bearer",
+    "private_key",
+    "signing_key",
+    "session_secret",
+    "session_secret_key",
+    "secret_key_base",
+    "smtp_password",
+    "cover_api_key",
+})
+
+# 兜底词根：只有在「整体等于该词根」或「被下划线分隔成独立一段」时才判定敏感。
+# 这样 author（无分隔符）与 authority 都不会被 auth 命中。
+_BOUNDARY_ROOTS: tuple[str, ...] = (
+    "token",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "key",
+    "apikey",
+    "cookie",
+    "auth",
+    "authorization",
+    "credential",
+    "credentials",
+    "bearer",
+)
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    """判断键名是否为敏感凭据字段：归一化 → 精确匹配 → 分隔符为界的词根兜底。"""
+    n = _normalize_key(key)
+    if n in _SENSITIVE_NORMALIZED or n in _EXTRA_SENSITIVE:
+        return True
+    for root in _BOUNDARY_ROOTS:
+        if n == root or n.endswith("_" + root) or n.startswith(root + "_"):
+            return True
+    return False
+
+
+# ============================================================
+#  值级脱敏：无键名的裸字符串
+# ============================================================
+# 键名层脱敏（_sanitize_for_log）只对 dict 的 key 生效，够不着
+# `safe_preview(response.text, 1000)` 这类整段上游响应体，
+# 也够不着 _log_raw_response_body 按 ERROR 分片打出的原始 body。
+# 实测泄漏样本（runtime/logs/wenshu.log，59 处 sk-SET_ME）：
+#   {"error":{"message":"Incorrect API key provided: sk-SET_ME. ..."}}
+# 即：API Key 出现在**值**里，与任何键名无关（日志里 "api_key": 形状 0 次）。
+# 所以这里按值的形态做模式替换，作为键名层之外的第二道防线。
+#
+# 误伤控制（本任务核心难点）：
+#   * 一律用「前置非字母数字」断言代替裸 \b —— \b 在 risk-assessment /
+#     task-scheduler 内部不成立（前面是 i / a 这类词字符），所以这两个险例
+#     天然不会命中；真正需要防的是**词首**的 sk-。
+#   * sk- 分两档：长 body（>=16，真实 OpenAI/Anthropic 密钥长度）无条件匹配；
+#     短 body（4~15）要求体内至少含一个大写字母 / 数字 / 下划线，
+#     这样 sk-SET_ME（大写+下划线，实测泄漏样本）命中，而 sk-learn /
+#     sk-etch 这类小写英文词不命中。
+#   * 十六进制密钥要求两侧都不是标识符字符，避免吃掉「32 位 hex 命名的
+#     文件名」这类正常 token。
+#   * 不做泛化高熵检测：正常文本里的长英文单词、base64 图片片段误伤率太高。
+_SECRET_VALUE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # OpenAI 风格长密钥：sk-xxx / sk-proj-xxx / sk-ant-xxx
+    (re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{16,}(?![A-Za-z0-9])"), "sk-***REDACTED***"),
+    # OpenAI 风格短占位密钥：sk-SET_ME / sk-LEAK12345（体内必须含大写/数字/下划线）
+    (
+        re.compile(
+            r"(?<![A-Za-z0-9])sk-(?=[A-Za-z0-9_\-]{4,15}(?![A-Za-z0-9]))"
+            r"(?=[A-Za-z0-9_\-]*[A-Z0-9_])[A-Za-z0-9_\-]+"
+        ),
+        "sk-***REDACTED***",
+    ),
+    # Google AI：AIzaSyXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    (re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_\-]{16,}(?![A-Za-z0-9])"), "AIza***REDACTED***"),
+    # Bearer token
+    (re.compile(r"(?i)(?<![A-Za-z0-9])(Bearer)\s+([A-Za-z0-9_\-\.=]{12,})"), r"\1 ***REDACTED***"),
+    # 常见 key 形态：32 位以上 hex（session secret 等）
+    (re.compile(r"(?<![0-9A-Za-z_\-])[0-9a-f]{32,}(?![0-9A-Za-z_\-])"), "***REDACTED_HEX***"),
+    # 内联的 key=value / "key":"value" 形态（值里是长随机串）
+    # 键名与分隔符之间允许一个引号：json 里是 `"password": "xxx"`，
+    # 键名的收尾引号必须吃掉，否则整条规则在 JSON 上永远不命中。
+    (
+        re.compile(
+            r"(?i)(?<![A-Za-z0-9])(api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|"
+            r"secret[_-]?key|password|passwd|pwd)([\"']?\s*[=:]\s*[\"']?)([A-Za-z0-9_\-\.=+/]{6,})"
+        ),
+        r"\1\2***REDACTED***",
+    ),
+)
+
+
+def _redact_secret_values(text: str) -> str:
+    """对裸字符串做值级密钥替换。
+
+    只在上过模式的形态上动手，不做泛化的高熵检测 —— 后者误伤率太高
+    （正常文本里的长英文单词、base64 图片片段）。
+    替换结果不会再被任一模式重新命中，因此幂等。
+    """
+    if not text:
+        return text
+    out = text
+    for pat, repl in _SECRET_VALUE_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+# 只输出结构摘要、不输出正文的键（归一化后比较）
+_SUMMARY_KEYS: frozenset[str] = frozenset({
+    "content",
+    "prompt",
+    "system_prompt",
+    "chapter_content",
+    "messages",
+    "arguments",
+})
+
+
 def _truncate_text(text: str, max_chars: Optional[int] = DEFAULT_LOG_PREVIEW_MAX_CHARS) -> str:
-    """截断长文本，保留原始长度便于排查。"""
+    """截断长文本，保留原始长度便于排查。
+
+    这里也是**所有字符串出口的收口点**（safe_preview / safe_json_preview /
+    UvicornFormatter.format 都经过它），所以在截断前先做值级脱敏。
+    顺序必须是「先脱敏再截断」：密钥若跨在截断边界上，先截断会把它切成
+    不匹配任何模式的残片，从而漏掉。
+    """
+    text = _redact_secret_values(text)
     if max_chars is None or max_chars <= 0 or len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}... [truncated, length={len(text)}]"
@@ -39,7 +225,11 @@ def safe_preview(value: Any, max_chars: int = DEFAULT_LOG_PREVIEW_MAX_CHARS) -> 
 
 
 def _sanitize_for_log(value: Any, depth: int = 0) -> Any:
-    """递归清理日志对象，避免敏感字段和正文全文输出。"""
+    """递归清理日志对象，避免敏感字段和正文全文输出。
+
+    覆盖结构：dict（含键名精确匹配与别名后处理）、list/tuple、set/frozenset、
+    以及带 __dict__ 的普通对象；字符串统一走 safe_preview 截断。
+    """
     if depth > 4:
         return f"<{type(value).__name__}>"
 
@@ -47,10 +237,9 @@ def _sanitize_for_log(value: Any, depth: int = 0) -> Any:
         sanitized = {}
         for key, item in value.items():
             key_str = str(key)
-            lower_key = key_str.lower()
-            if any(sensitive_key in lower_key for sensitive_key in SENSITIVE_LOG_KEYS):
+            if _is_sensitive_key(key_str):
                 sanitized[key_str] = "***REDACTED***"
-            elif lower_key in {"content", "prompt", "system_prompt", "chapter_content", "messages", "arguments"}:
+            elif _normalize_key(key_str) in _SUMMARY_KEYS:
                 sanitized[key_str] = summarize_log_value(item)
             else:
                 sanitized[key_str] = _sanitize_for_log(item, depth + 1)
@@ -61,8 +250,24 @@ def _sanitize_for_log(value: Any, depth: int = 0) -> Any:
             [f"... {len(value) - 10} more items"] if len(value) > 10 else []
         )
 
+    # set / frozenset：元素本身没有键名，无法按键名判定。
+    # 元素若是 dict 仍递归打码；若是标量则按「未知来源字符串」处理，
+    # 走 safe_preview 截断，避免长正文进日志。
+    if isinstance(value, (set, frozenset)):
+        items = list(value)
+        return {
+            _sanitize_for_log(item, depth + 1)
+            if isinstance(item, (dict, list, tuple, set, frozenset))
+            else safe_preview(str(item))
+            for item in items[:10]
+        }
+
     if isinstance(value, str):
         return safe_preview(value)
+
+    # 普通对象（数据类实例等）：有 __dict__ 就递归其字段，命中敏感键名同样打码
+    if hasattr(value, "__dict__") and getattr(value, "__dict__", None):
+        return _sanitize_for_log(vars(value), depth + 1)
 
     return value
 

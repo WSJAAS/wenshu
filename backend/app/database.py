@@ -135,9 +135,15 @@ async def get_engine(user_id: str):
                         cursor.execute("PRAGMA synchronous=NORMAL")
                         cursor.execute("PRAGMA cache_size=-64000")  # 64MB 缓存
                         cursor.execute("PRAGMA busy_timeout=30000")  # 30秒超时
+                        # 外键约束。SQLite 默认关闭（每个连接独立，非持久化设置），
+                        # 不开则模型里所有 ondelete='CASCADE' / 'SET NULL' 全部失效：
+                        # 删章节不会清理 analysis_tasks / regeneration_tasks，
+                        # 删项目不会清理 outlines / characters / story_memories，
+                        # 长期运行会攒出孤儿行。必须在每个新连接上重设。
+                        cursor.execute("PRAGMA foreign_keys=ON")
                         cursor.close()
                     
-                    logger.info("✅ SQLite WAL 模式已启用（支持读写并发）")
+                    logger.info("✅ SQLite WAL 模式已启用（支持读写并发，外键约束已开启）")
                 except Exception as e:
                     logger.warning(f"⚠️ 启用 WAL 模式失败: {e}，使用默认配置")
         

@@ -85,6 +85,9 @@ RUN set -eu; \
 # 复制后端代码（不包含embedding，因为已经下载了）
 COPY backend/ ./
 
+# 复制文本重塑引擎（rewrite_engine.py 通过 parents[3] 在容器内解析为 /engine）
+COPY engine/ /engine/
+
 # 从前端构建阶段复制构建好的静态文件
 COPY --from=frontend-builder /frontend/dist ./static
 

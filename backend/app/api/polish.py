@@ -13,10 +13,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -38,6 +39,15 @@ logger = get_logger(__name__)
 
 # 采纳稿落盘目录：放在数据目录下，不写进代码目录
 ACCEPT_DIR = DATA_DIR / "accepted"
+
+# 模式 / 任务ID 的字符白名单。
+#
+# `mode` 与 `task_id` 都会直接被拼进文件名（`{mode}_{stamp}_{task_id}.txt`），
+# `mode` 还会拼成历史文件名（`{mode}_history.json`）。两者都是纯用户可控字符串，
+# 不做限制时可就地穿越：`mode="..\\..\\..\\..\\..\\_x"` 会把文件写到父目录，
+# `mode="C:\\...\\victim.bin:"` 会写 Windows ADS（备用数据流）。
+# 这里只放行无路径语义的字符，长度上限 32 与既有文件名形态一致。
+SAFE_NAME_PATTERN = r"^[A-Za-z0-9_\-]{1,32}$"
 
 
 # ============================================================
@@ -79,8 +89,30 @@ class PolishResponse(BaseModel):
 
 class AcceptRequest(BaseModel):
     text: str
-    mode: str = "novel"
-    task_id: Optional[str] = None
+    mode: str = Field(
+        "novel",
+        pattern=SAFE_NAME_PATTERN,
+        description="模式，仅允许字母数字下划线连字符",
+    )
+    task_id: Optional[str] = Field(
+        None,
+        pattern=SAFE_NAME_PATTERN,
+        description="任务ID，仅允许字母数字下划线连字符",
+    )
+
+    @field_validator("task_id", mode="before")
+    @classmethod
+    def _blank_task_id_is_none(cls, v):
+        """空串归一化为 None。
+
+        `tools/novelctl.py` 无条件发送 `"task_id": ""`，前端 `polishApi.accept`
+        在未传 taskId 时也会给出空串。空串本身不构成路径穿越（拼进文件名只是
+        多一个下划线），但没有任务 ID 的语义，统一按 None 处理，避免 CLI 与
+        前端因为白名单 {1,32} 的长度下限被误拒。
+        """
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
 
 class DiagnoseRequest(BaseModel):
@@ -288,7 +320,11 @@ async def polish_accept(request: AcceptRequest):
     ACCEPT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = f"{request.mode}_{stamp}" + (f"_{request.task_id}" if request.task_id else "")
-    target = ACCEPT_DIR / f"{name}.txt"
+    target = (ACCEPT_DIR / f"{name}.txt").resolve()
+    # 防御纵深：白名单已挡住穿越入参，这里再断言一次最终落点。
+    # 若将来有人放宽 SAFE_NAME_PATTERN 或改用其它字段拼名，越界会在此拦下。
+    if not target.is_relative_to(ACCEPT_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="非法的文件名")
     target.write_text(text, encoding="utf-8")
 
     history = _load_history(request.mode)
@@ -313,15 +349,22 @@ async def polish_accept(request: AcceptRequest):
 
 
 @router.post("/rollback", summary="回退到上一版")
-async def polish_rollback(mode: str = "novel"):
+async def polish_rollback(
+    mode: str = Query("novel", pattern=SAFE_NAME_PATTERN, description="模式，仅允许字母数字下划线连字符"),
+):
     """取回上一版采纳稿。"""
     history = _load_history(mode)
     if len(history) < 2:
         raise HTTPException(status_code=400, detail="只有一版记录，没有可回退的上一版")
 
     previous = history[-2]
-    path = DATA_DIR / "accepted" / f"{previous['name']}.txt" if not previous.get("path") else None
-    prev_path = path if path else __import__("pathlib").Path(previous["path"])
+    # 历史文件里的 path 来自落盘记录，但该 JSON 可被外部改写，
+    # 且早期版本写入的可能是相对/穿越路径。读取前必须断言仍在采纳目录内，
+    # 否则回退接口会变成「读取任意文件」。
+    raw_path = previous.get("path") or str(ACCEPT_DIR / f"{previous['name']}.txt")
+    prev_path = Path(raw_path).resolve()
+    if not prev_path.is_relative_to(ACCEPT_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="版本记录中的路径非法")
     if not prev_path.is_file():
         raise HTTPException(status_code=404, detail=f"上一版文件已不存在: {prev_path}")
 
@@ -333,7 +376,9 @@ async def polish_rollback(mode: str = "novel"):
 
 
 @router.get("/versions", summary="列出采纳历史")
-async def polish_versions(mode: str = "novel"):
+async def polish_versions(
+    mode: str = Query("novel", pattern=SAFE_NAME_PATTERN, description="模式，仅允许字母数字下划线连字符"),
+):
     """列出某个模式的采纳版本。"""
     history = _load_history(mode)
     return {"total": len(history), "items": history}

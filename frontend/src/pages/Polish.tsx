@@ -10,6 +10,7 @@ import {
   Col,
   Switch,
   message,
+  Modal,
   Statistic,
   Divider,
   Alert,
@@ -66,6 +67,7 @@ export default function Polish() {
   const [versions, setVersions] = useState<AcceptRecord[]>([]);
   const [engineOk, setEngineOk] = useState<boolean | null>(null);
   const [msgApi, ctxHolder] = message.useMessage();
+  const [modal, modalHolder] = Modal.useModal();
 
   // 引擎状态 + 采纳历史
   const refreshSide = useCallback(async () => {
@@ -132,6 +134,26 @@ export default function Polish() {
     }
   };
 
+  // ---- 采纳（二次确认） ----
+  const confirmAccept = () => {
+    if (!result?.polished_text) {
+      msgApi.warning('没有可采纳的候选稿');
+      return;
+    }
+    const isLocalRules = result.engine === 'local_rules';
+    modal.confirm({
+      title: '确认采纳候选稿',
+      content: isLocalRules
+        ? '当前候选稿来自本地规则改写（不是模型生成），质量可能有限。采纳后将作为新版本落盘，原稿不受影响。'
+        : '采纳后将作为新版本落盘，原稿不受影响，可通过「回退」取回上一版。',
+      centered: true,
+      okText: '确认采纳',
+      cancelText: '取消',
+      ...(isLocalRules ? { okButtonProps: { type: 'default' as const } } : {}),
+      onOk: handleAccept,
+    });
+  };
+
   // ---- 回退 ----
   const handleRollback = async () => {
     try {
@@ -155,6 +177,7 @@ export default function Polish() {
   return (
     <div style={{ padding: isMobile ? 12 : 24, maxWidth: 1600, margin: '0 auto' }}>
       {ctxHolder}
+      {modalHolder}
 
       <div style={{ marginBottom: 16 }}>
         <Title level={4} style={{ marginBottom: 4 }}>
@@ -251,7 +274,7 @@ export default function Polish() {
                   type="primary"
                   icon={<SaveOutlined />}
                   disabled={!result?.polished_text}
-                  onClick={handleAccept}
+                  onClick={confirmAccept}
                 >
                   采纳
                 </Button>

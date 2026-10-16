@@ -34,6 +34,7 @@ export const PartialRegenerateModal: React.FC<PartialRegenerateModalProps> = ({
   onApply,
 }) => {
   const { token } = theme.useToken();
+  const [modal, contextHolder] = Modal.useModal();
   const [userInstructions, setUserInstructions] = useState('');
   const [lengthMode, setLengthMode] = useState<LengthMode>('similar');
   const [customWordCount, setCustomWordCount] = useState<number>(selectedText.length);
@@ -78,7 +79,10 @@ export const PartialRegenerateModal: React.FC<PartialRegenerateModalProps> = ({
     setProgressMessage('准备生成...');
 
     // 创建 AbortController 用于取消请求
-    abortControllerRef.current = new AbortController();
+    // 用局部变量持有，既避免 abortControllerRef.current 的 null 检查，
+    // 又保证下面 options.signal 与 handleCancel 里的 abort() 指向同一个 controller
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     try {
       await chapterApi.partialRegenerateStream(
@@ -114,6 +118,9 @@ export const PartialRegenerateModal: React.FC<PartialRegenerateModalProps> = ({
             setIsGenerating(false);
             setHasGenerated(true);
           },
+          // 关键：把 AbortSignal 传进 ssePost，否则 handleCancel 的 abort() 无法中断 fetch，
+          // 且流在 complete/done 之前断开时 sseClient 既不 resolve 也不 reject，await 永久挂起
+          signal: controller.signal,
         }
       );
     } catch (error) {
@@ -121,7 +128,16 @@ export const PartialRegenerateModal: React.FC<PartialRegenerateModalProps> = ({
       if ((error as Error).name !== 'AbortError') {
         message.error('生成失败，请重试');
       }
-      setIsGenerating(false);
+      // 状态复位统一交给下面的 finally（带身份校验），避免此处无差别复位
+      // 覆盖掉用户随后新发起的一轮生成
+    } finally {
+      // 兜底复位：正常完成路径由 onComplete 复位；此处保证任何 settle 方式
+      // （done / result / error / AbortError / 流中断 reject）都不会让按钮永久置灰。
+      // 身份校验：仅当 ref 仍指向本次 controller 时才复位，避免上一轮迟到的 settle
+      // 关闭掉用户新发起的一轮生成。
+      if (abortControllerRef.current === controller) {
+        setIsGenerating(false);
+      }
     }
   };
 
@@ -157,6 +173,27 @@ export const PartialRegenerateModal: React.FC<PartialRegenerateModalProps> = ({
     }
   };
 
+  // 二次确认后再落盘（生成中不可触发，且确认框内按钮亦受 isGenerating 约束）
+  const confirmAccept = () => {
+    if (isGenerating) {
+      message.warning('正在生成中，请等待完成后再应用');
+      return;
+    }
+    if (!generatedText.trim()) {
+      message.warning('没有可应用的内容');
+      return;
+    }
+    modal.confirm({
+      title: '确认应用重写内容',
+      content: '将用重写后的文本替换原文中选定的片段。此操作会修改正文。',
+      centered: true,
+      okText: '确认应用',
+      cancelText: '取消',
+      okButtonProps: { disabled: isGenerating },
+      onOk: handleAccept,
+    });
+  };
+
   const handleRegenerate = () => {
     setGeneratedText('');
     setHasGenerated(false);
@@ -176,7 +213,9 @@ export const PartialRegenerateModal: React.FC<PartialRegenerateModalProps> = ({
   };
 
   return (
-    <Modal
+    <>
+      {contextHolder}
+      <Modal
       title={
         <Space>
           <EditOutlined style={{ color: token.colorPrimary }} />
@@ -221,7 +260,9 @@ export const PartialRegenerateModal: React.FC<PartialRegenerateModalProps> = ({
               <Button
                 type="primary"
                 icon={<CheckOutlined />}
-                onClick={handleAccept}
+                onClick={confirmAccept}
+                /* 生成中禁用；confirmAccept 内亦有早退检查，此处为 UI 层冗余防御 */
+                disabled={isGenerating}
                 style={{ background: token.colorSuccess, borderColor: token.colorSuccess }}
               >
                 接受并应用
@@ -445,6 +486,7 @@ export const PartialRegenerateModal: React.FC<PartialRegenerateModalProps> = ({
         }
       `}</style>
     </Modal>
+    </>
   );
 };
 

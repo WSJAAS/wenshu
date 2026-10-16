@@ -101,7 +101,8 @@ def _is_content_quote(text: str, pos: int) -> bool:
         return True
     
     # : → 通常在字符串结束后不可能出现，保守处理为结束引号
-    if ch == ':':
+    # 全角冒号 ：(U+FF1A) 同样视为结构位置字符，避免 key 结束引号被误判为内容引号
+    if ch in (':', '\uff1a'):
         return False
     
     # 其他字符（中文、字母等）→ 内容引号

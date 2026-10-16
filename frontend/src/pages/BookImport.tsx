@@ -24,14 +24,16 @@ import {
   theme,
 } from 'antd';
 import type { UploadFile } from 'antd/es/upload/interface';
-import { InboxOutlined, PlayCircleOutlined, ReloadOutlined, StopOutlined, WarningOutlined, RedoOutlined } from '@ant-design/icons';
-import { bookImportApi } from '../services/api';
+import { InboxOutlined, PlayCircleOutlined, ReloadOutlined, StopOutlined, WarningOutlined, RedoOutlined, CloudDownloadOutlined, ImportOutlined } from '@ant-design/icons';
+import { bookImportApi, downloadApi } from '../services/api';
+import { eventBus, EventNames } from '../store/eventBus';
 import type {
   BookImportApplyPayload,
   BookImportExtractMode,
   BookImportPreview,
   BookImportStepFailure,
   BookImportTask,
+  DownloadJob,
 } from '../types';
 
 const { Text, Title } = Typography;
@@ -136,6 +138,13 @@ export default function BookImport() {
   const [retryProgress, setRetryProgress] = useState(0);
   const [retryMessage, setRetryMessage] = useState('');
   const importedProjectId = useRef<string | null>(null);
+
+  // ---- 从下载管理器导入（step0 面板）----
+  // 只读下载侧数据：列出任务、按状态给「导入此书 / 打开该拆书任务」入口。
+  // 面板不干扰现有上传流程；setTaskId 后由现有 useEffect 自动接管轮询与预览。
+  const [dlJobs, setDlJobs] = useState<DownloadJob[]>([]);
+  const [dlLoading, setDlLoading] = useState(false);
+  const [dlImporting, setDlImporting] = useState<Record<string, boolean>>({});
 
   const isTaskTerminal = useMemo(() => {
     return !!taskStatus && ['completed', 'failed', 'cancelled'].includes(taskStatus.status);
@@ -299,6 +308,57 @@ export default function BookImport() {
 
     return () => clearInterval(timer);
   }, [taskId, isTaskTerminal]);
+
+  // ---- 下载管理器面板：数据加载与 3s 轮询（仅 step0 且挂载时）----
+  // currentStep 由 taskId 等派生；只有还没开始拆书任务（step0）时才轮询，
+  // 一旦 setTaskId 进入解析流程，面板随 step0 一起卸载，轮询自然停止。
+  useEffect(() => {
+    if (currentStep !== 0) return;
+    let stopped = false;
+    const load = async () => {
+      try {
+        const list = await downloadApi.jobs(20);
+        if (!stopped) setDlJobs(list);
+      } catch {
+        /* 下载侧未启用或失败时静默：面板显示空态，不影响上传入口 */
+      }
+    };
+    setDlLoading(true);
+    void load().finally(() => { if (!stopped) setDlLoading(false); });
+    const timer = window.setInterval(() => void load(), 3000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [currentStep]);
+
+  /** 从下载任务直接创建拆书任务，成功后交给现有流程接管 */
+  const importFromDownload = async (job: DownloadJob) => {
+    setDlImporting((prev) => ({ ...prev, [job.id]: true }));
+    try {
+      const resp = await downloadApi.bookImportFromDownload(
+        job.id,
+        effectiveExtractMode,
+        normalizedTailChapterCount,
+      );
+      message.success('已从下载管理器创建拆书任务');
+      eventBus.emit(EventNames.BOOK_IMPORT_TASK_CREATED, { task_id: resp.task_id });
+      // 现有 useEffect 会自动接管状态轮询与 preview 拉取
+      setTaskId(resp.task_id);
+    } catch (error) {
+      const err = error as { response?: { data?: { detail?: string } }; message?: string };
+      message.error(`导入失败：${err?.response?.data?.detail || err?.message || '未知原因'}`);
+    } finally {
+      setDlImporting((prev) => ({ ...prev, [job.id]: false }));
+    }
+  };
+
+  /** 已交接的任务：直接挂进现有流程查看进度/预览 */
+  const openHandedTask = (job: DownloadJob) => {
+    if (!job.import_task_id) return;
+    setTaskId(job.import_task_id);
+    message.info('已打开该拆书任务');
+  };
 
   useEffect(() => {
     const fetchPreview = async () => {
@@ -799,6 +859,119 @@ export default function BookImport() {
       </Card>
       )}
 
+      {currentStep === 0 && (
+      <Card
+        size="small"
+        title={
+          <Space>
+            <CloudDownloadOutlined />
+            <Text strong>从下载管理器导入</Text>
+          </Space>
+        }
+        extra={
+          <Button type="link" size="small" onClick={() => navigate('/?view=source')}>
+            去下载管理器
+          </Button>
+        }
+        style={{ marginBottom: 16 }}
+      >
+        <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 12 }}>
+          在线书源页整本下载的书籍会出现在这里。已完成的可直接导入拆书，省去手动下载上传。
+          解析范围沿用上方「解析范围设置」。
+        </Text>
+        {dlLoading && dlJobs.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '16px 0' }}>
+            <Spin size="small" />
+          </div>
+        ) : dlJobs.length === 0 ? (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                暂无下载任务。可先到「在线书源」页整本下载一本书。
+              </Text>
+            }
+          />
+        ) : (
+          <List
+            size="small"
+            dataSource={dlJobs}
+            renderItem={(job) => {
+              const stateMeta: Record<string, { color: string; label: string }> = {
+                queued: { color: 'default', label: '排队中' },
+                running: { color: 'processing', label: '下载中' },
+                done: { color: 'success', label: '已完成' },
+                error: { color: 'error', label: '失败' },
+                cancelled: { color: 'default', label: '已取消' },
+                lost: { color: 'warning', label: '状态丢失' },
+              };
+              const meta = stateMeta[job.state] || { color: 'default', label: job.state };
+              const isDownloading = job.state === 'queued' || job.state === 'running';
+              return (
+                <List.Item
+                  actions={[
+                    job.import_task_id ? (
+                      <Button
+                        key="open"
+                        size="small"
+                        icon={<ImportOutlined />}
+                        onClick={() => openHandedTask(job)}
+                      >
+                        打开该拆书任务
+                      </Button>
+                    ) : job.state === 'done' ? (
+                      <Button
+                        key="import"
+                        size="small"
+                        type="primary"
+                        icon={<PlayCircleOutlined />}
+                        loading={dlImporting[job.id]}
+                        onClick={() => void importFromDownload(job)}
+                      >
+                        导入此书
+                      </Button>
+                    ) : (
+                      <Button key="wait" size="small" disabled>
+                        {isDownloading ? '下载中…' : '不可导入'}
+                      </Button>
+                    ),
+                  ]}
+                >
+                  <List.Item.Meta
+                    title={
+                      <Space wrap size={8}>
+                        <Tag color={meta.color}>{meta.label}</Tag>
+                        <Text style={{ fontSize: 13 }}>{job.book_title || `书籍 ${job.book_id}`}</Text>
+                        {job.book_author && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>（{job.book_author}）</Text>
+                        )}
+                        {job.import_task_id && (
+                          <Tag color={job.import_status === 'handed' ? 'blue' : 'red'}>
+                            {job.import_status === 'handed' ? '已交接拆书' : '交接失败'}
+                          </Tag>
+                        )}
+                      </Space>
+                    }
+                    description={
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {isDownloading && job.chapter_total > 0
+                          ? `下载进度 ${job.saved_chapters} / ${job.chapter_total} 章`
+                          : job.txt_chars > 0
+                            ? `正文约 ${(job.txt_chars / 10000).toFixed(1)} 万字`
+                            : job.epub_bytes > 0
+                              ? `打包产物 ${(job.epub_bytes / 1024 / 1024).toFixed(1)} MB`
+                              : job.message || ''}
+                      </Text>
+                    }
+                  />
+                </List.Item>
+              );
+            }}
+          />
+        )}
+      </Card>
+      )}
+
       {currentStep === 1 && (
       <Card title="解析任务状态" style={{ marginBottom: 16 }}>
         {!taskId ? (
@@ -1030,8 +1203,8 @@ export default function BookImport() {
               'active'
             }
             strokeColor={{
-              '0%': 'var(--color-primary)',
-              '100%': failedSteps.length > 0 ? '#faad14' : 'var(--color-primary-active)',
+              '0%': 'var(--ant-color-primary)',
+              '100%': failedSteps.length > 0 ? '#faad14' : 'var(--ant-color-primary-active)',
             }}
             style={{ marginBottom: 24 }}
           />
@@ -1040,9 +1213,9 @@ export default function BookImport() {
             style={{
               fontSize: 16,
               marginBottom: 32,
-              color: applyError ? 'var(--color-error)' :
+              color: applyError ? 'var(--ant-color-error)' :
                 (failedSteps.length > 0 && isApplyComplete && !retrying) ? '#faad14' :
-                'var(--color-text-secondary)'
+                'var(--ant-color-text-secondary)'
             }}
           >
             {retrying ? retryMessage : (applyError || applyMessage)}
@@ -1134,7 +1307,7 @@ export default function BookImport() {
           
           {!failedSteps.length && !retrying && (
             <div style={{
-              background: 'var(--color-bg-layout)',
+              background: 'var(--ant-color-bg-layout)',
               padding: 16,
               borderRadius: 8,
               textAlign: 'left',

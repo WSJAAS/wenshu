@@ -230,6 +230,8 @@ async def refresh_changelog(user=Depends(require_login)):
             "cache_time": _cache["timestamp"].isoformat()
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"刷新缓存时发生错误: {str(e)}")
         raise HTTPException(

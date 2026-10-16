@@ -805,6 +805,8 @@ async def create_character(
         
         return char_dict
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"手动创建角色失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"创建角色失败: {str(e)}")
@@ -1486,6 +1488,8 @@ async def import_characters(
         
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"JSON格式错误: {str(e)}")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"导入角色/组织失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
@@ -1532,6 +1536,8 @@ async def validate_import(
             "errors": [f"JSON格式错误: {str(e)}"],
             "warnings": []
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"验证导入文件失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"验证失败: {str(e)}")

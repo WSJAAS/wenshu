@@ -213,6 +213,11 @@ export default function ProjectDetail() {
           label: <Link to={`/project/${projectId}/writing-styles`}>写作风格</Link>,
         },
         {
+          key: 'polish',
+          icon: <ExperimentOutlined />,
+          label: <Link to={`/project/${projectId}/polish`}>文本重塑</Link>,
+        },
+        {
           key: 'prompt-workshop',
           icon: <CloudOutlined />,
           label: <Link to={`/project/${projectId}/prompt-workshop`}>提示词工坊</Link>,
@@ -231,78 +236,8 @@ export default function ProjectDetail() {
     },
   ];
 
-  const menuItemsCollapsed = [
-    {
-      key: 'world-setting',
-      icon: <GlobalOutlined />,
-      label: <Link to={`/project/${projectId}/world-setting`}>世界设定</Link>,
-    },
-    {
-      key: 'careers',
-      icon: <TrophyOutlined />,
-      label: <Link to={`/project/${projectId}/careers`}>职业管理</Link>,
-    },
-    {
-      key: 'characters',
-      icon: <TeamOutlined />,
-      label: <Link to={`/project/${projectId}/characters`}>角色管理</Link>,
-    },
-    {
-      key: 'relationships',
-      icon: <ApartmentOutlined />,
-      label: <Link to={`/project/${projectId}/relationships`}>关系管理</Link>,
-    },
-    {
-      key: 'organizations',
-      icon: <BankOutlined />,
-      label: <Link to={`/project/${projectId}/organizations`}>组织管理</Link>,
-    },
-    {
-      key: 'outline',
-      icon: <FileTextOutlined />,
-      label: <Link to={`/project/${projectId}/outline`}>大纲管理</Link>,
-    },
-    {
-      key: 'chapters',
-      icon: <BookOutlined />,
-      label: <Link to={`/project/${projectId}/chapters`}>章节管理</Link>,
-    },
-    {
-      key: 'chapter-analysis',
-      icon: <FundOutlined />,
-      label: <Link to={`/project/${projectId}/chapter-analysis`}>剧情分析</Link>,
-    },
-    {
-      key: 'foreshadows',
-      icon: <BulbOutlined />,
-      label: <Link to={`/project/${projectId}/foreshadows`}>伏笔管理</Link>,
-    },
-    {
-      key: 'writing-styles',
-      icon: <EditOutlined />,
-      label: <Link to={`/project/${projectId}/writing-styles`}>写作风格</Link>,
-    },
-    {
-      key: 'polish',
-      icon: <ExperimentOutlined />,
-      label: <Link to={`/project/${projectId}/polish`}>文本重塑</Link>,
-    },
-    {
-      key: 'prompt-workshop',
-      icon: <CloudOutlined />,
-      label: <Link to={`/project/${projectId}/prompt-workshop`}>提示词工坊</Link>,
-    },
-    {
-      key: 'skill-chat',
-      icon: <ThunderboltOutlined />,
-      label: <Link to={`/project/${projectId}/skill-chat`}>Skill 工具箱</Link>,
-    },
-    {
-      key: 'skill-manage',
-      icon: <SettingOutlined />,
-      label: <Link to={`/project/${projectId}/skill-manage`}>Skill 管理</Link>,
-    },
-  ];
+  // 折叠态菜单：由 menuItems 单数据源拍平分组派生，避免第二份手工维护数组漏项。
+  const menuItemsCollapsed = menuItems.flatMap(g => ('children' in g ? g.children : [g]));
 
   // 根据当前路径动态确定选中的菜单项
   const selectedKey = useMemo(() => {

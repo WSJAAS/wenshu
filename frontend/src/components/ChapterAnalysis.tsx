@@ -242,13 +242,13 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
 
     switch (task.status) {
       case 'pending':
-        return <ClockCircleOutlined style={{ color: 'var(--color-warning)' }} />;
+        return <ClockCircleOutlined style={{ color: 'var(--ant-color-warning)' }} />;
       case 'running':
         return <Spin />;
       case 'completed':
-        return <CheckCircleOutlined style={{ color: 'var(--color-success)' }} />;
+        return <CheckCircleOutlined style={{ color: 'var(--ant-color-success)' }} />;
       case 'failed':
-        return <CloseCircleOutlined style={{ color: 'var(--color-error)' }} />;
+        return <CloseCircleOutlined style={{ color: 'var(--ant-color-error)' }} />;
       default:
         return null;
     }
@@ -276,7 +276,7 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
             fontSize: 20,
             fontWeight: 'bold',
             marginTop: 16,
-            color: task.status === 'failed' ? 'var(--color-error)' : 'var(--color-text-primary)'
+            color: task.status === 'failed' ? 'var(--ant-color-error)' : 'var(--ant-color-text)'
           }}>
             {task.status === 'pending' && '等待分析...'}
             {task.status === 'running' && 'AI正在分析中...'}
@@ -292,7 +292,7 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
         }}>
           <div style={{
             height: 12,
-            background: 'var(--color-bg-layout)',
+            background: 'var(--ant-color-bg-layout)',
             borderRadius: 6,
             overflow: 'hidden',
             marginBottom: 12
@@ -300,10 +300,10 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
             <div style={{
               height: '100%',
               background: task.status === 'failed'
-                ? 'var(--color-error)'
+                ? 'var(--ant-color-error)'
                 : task.progress === 100
-                  ? 'var(--color-success)'
-                  : 'var(--color-primary)',
+                  ? 'var(--ant-color-success)'
+                  : 'var(--ant-color-primary)',
               width: `${task.progress}%`,
               transition: 'all 0.3s ease',
               borderRadius: 6,
@@ -318,8 +318,8 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
             textAlign: 'center',
             fontSize: 32,
             fontWeight: 'bold',
-            color: task.status === 'failed' ? 'var(--color-error)' :
-              task.progress === 100 ? 'var(--color-success)' : 'var(--color-primary)',
+            color: task.status === 'failed' ? 'var(--ant-color-error)' :
+              task.progress === 100 ? 'var(--ant-color-success)' : 'var(--ant-color-primary)',
             marginBottom: 8
           }}>
             {task.progress}%
@@ -330,7 +330,7 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
         <div style={{
           textAlign: 'center',
           fontSize: 16,
-          color: 'var(--color-text-secondary)',
+          color: 'var(--ant-color-text-secondary)',
           minHeight: 24,
           marginBottom: 16
         }}>
@@ -358,7 +358,7 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
           <div style={{
             textAlign: 'center',
             fontSize: 13,
-            color: 'var(--color-text-tertiary)',
+            color: 'var(--ant-color-text-secondary)',
             marginTop: 16
           }}>
             分析过程需要一定时间，请耐心等待
@@ -432,7 +432,7 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
                         title="整体质量"
                         value={analysis_data.overall_quality_score || 0}
                         suffix="/ 10"
-                        valueStyle={{ color: 'var(--color-success)' }}
+                        valueStyle={{ color: 'var(--ant-color-success)' }}
                       />
                     </Col>
                     <Col span={isMobile ? 12 : 6}>

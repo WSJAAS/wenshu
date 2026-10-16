@@ -4,7 +4,14 @@ from typing import Any, AsyncGenerator, Dict, Optional
 from anthropic import AsyncAnthropic
 
 from app.logger import get_logger
-from app.services.ai_config import AIClientConfig, default_config
+from app.services.ai_config import (
+    AIClientConfig,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    MODEL_MAX_OUTPUT_TOKENS,
+    clamp_max_output_tokens,
+    default_config,
+    should_warn_max_tokens_clamp,
+)
 
 logger = get_logger(__name__)
 
@@ -48,9 +55,20 @@ class AnthropicClient:
         tools: Optional[list] = None,
         tool_choice: Optional[str] = None,
     ) -> Dict[str, Any]:
+        # 收敛 max_tokens：存量脏值直接透传会被上游 400/422
+        limit = MODEL_MAX_OUTPUT_TOKENS.get(model, DEFAULT_MAX_OUTPUT_TOKENS)
+        effective_max_tokens = clamp_max_output_tokens(model, max_tokens)
+        if effective_max_tokens != max_tokens and should_warn_max_tokens_clamp(
+            model, max_tokens, limit
+        ):
+            logger.warning(
+                "max_tokens %s 超出模型 %s 的上限 %s，已收敛为 %s（同组合仅告警一次）",
+                max_tokens, model, limit, effective_max_tokens,
+            )
+
         kwargs = {
             "model": model,
-            "max_tokens": max_tokens,
+            "max_tokens": effective_max_tokens,
             "temperature": temperature,
             "messages": messages,
         }
@@ -111,9 +129,20 @@ class AnthropicClient:
             - tool_calls: list - 工具调用列表（如果有）
             - done: bool - 是否结束
         """
+        # 收敛 max_tokens：存量脏值直接透传会被上游 400/422
+        limit = MODEL_MAX_OUTPUT_TOKENS.get(model, DEFAULT_MAX_OUTPUT_TOKENS)
+        effective_max_tokens = clamp_max_output_tokens(model, max_tokens)
+        if effective_max_tokens != max_tokens and should_warn_max_tokens_clamp(
+            model, max_tokens, limit
+        ):
+            logger.warning(
+                "max_tokens %s 超出模型 %s 的上限 %s，已收敛为 %s（同组合仅告警一次）",
+                max_tokens, model, limit, effective_max_tokens,
+            )
+
         kwargs = {
             "model": model,
-            "max_tokens": max_tokens,
+            "max_tokens": effective_max_tokens,
             "temperature": temperature,
             "messages": messages,
         }
@@ -129,32 +158,65 @@ class AnthropicClient:
         try:
             async with self.client.messages.stream(**kwargs) as stream:
                 try:
-                    tool_calls = []
-                    async for chunk in stream:
-                        # 处理不同类型的块
-                        if chunk.type == "text_delta":
-                            yield {"content": chunk.text}
-                        elif chunk.type == "tool_use_delta":
-                            # 工具调用增量
-                            if not tool_calls or tool_calls[-1].get("id") != chunk.id:
+                    tool_calls: list = []
+                    finish_reason: Optional[str] = None
+                    done_emitted = False
+
+                    async for event in stream:
+                        # 事件字段随 SDK 版本变化，一律 getattr 兜底，不做直接属性访问
+                        event_type = getattr(event, "type", None)
+
+                        if event_type == "content_block_start":
+                            # tool_use 块的 id / name 只在这里出现
+                            block = getattr(event, "content_block", None)
+                            if getattr(block, "type", None) == "tool_use":
                                 tool_calls.append({
-                                    "id": chunk.id,
+                                    "id": getattr(block, "id", "") or "",
                                     "type": "function",
                                     "function": {
-                                        "name": chunk.name,
-                                        "arguments": ""
-                                    }
+                                        "name": getattr(block, "name", "") or "",
+                                        "arguments": "",
+                                    },
                                 })
-                            # 追加参数
-                            if tool_calls[-1]["function"]["arguments"] is None:
-                                tool_calls[-1]["function"]["arguments"] = ""
-                            tool_calls[-1]["function"]["arguments"] += chunk.input_gets_new_text or ""
-                        elif chunk.type == "message_delta":
-                            if chunk.stop_reason:
-                                # 流结束
+
+                        elif event_type == "content_block_delta":
+                            # 文本增量与工具参数增量都在 delta 里，事件顶层没有 text / partial_json
+                            delta = getattr(event, "delta", None)
+                            delta_type = getattr(delta, "type", None)
+                            if delta_type in ("text_delta", "text"):
+                                text = getattr(delta, "text", "") or ""
+                                if text:
+                                    yield {"content": text}
+                            elif delta_type in ("input_json_delta", "tool_use_delta"):
+                                partial = getattr(delta, "partial_json", "") or ""
+                                if partial and tool_calls:
+                                    tool_calls[-1]["function"]["arguments"] += partial
+
+                        elif event_type == "message_delta":
+                            # stop_reason 在 delta 下，RawMessageDeltaEvent 顶层没有该字段
+                            delta = getattr(event, "delta", None)
+                            reason = getattr(delta, "stop_reason", None)
+                            if reason:
+                                finish_reason = reason
                                 if tool_calls:
                                     yield {"tool_calls": tool_calls}
-                                yield {"done": True, "finish_reason": chunk.stop_reason}
+                                yield {"done": True, "finish_reason": finish_reason}
+                                done_emitted = True
+
+                        elif event_type == "message_stop":
+                            # 兜底：有的上游/代理不回 message_delta 的 stop_reason，
+                            # 不能让调用方静默收不到收尾信号
+                            if not done_emitted:
+                                if tool_calls:
+                                    yield {"tool_calls": tool_calls}
+                                yield {"done": True, "finish_reason": finish_reason}
+                                done_emitted = True
+
+                    # 兜底：流被异常截断且连 message_stop 都没有时，仍要给出收尾信号
+                    if not done_emitted:
+                        if tool_calls:
+                            yield {"tool_calls": tool_calls}
+                        yield {"done": True, "finish_reason": finish_reason}
                 except GeneratorExit:
                     # 生成器被关闭，这是正常的清理过程
                     logger.debug("Anthropic 流式响应生成器被关闭(GeneratorExit)")

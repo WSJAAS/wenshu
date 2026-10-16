@@ -3,7 +3,13 @@ import json
 from typing import Any, AsyncGenerator, Dict, Optional
 
 from app.logger import get_logger, summarize_log_value
-from app.services.ai_config import AIClientConfig
+from app.services.ai_config import (
+    AIClientConfig,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    MODEL_MAX_OUTPUT_TOKENS,
+    clamp_max_output_tokens,
+    should_warn_max_tokens_clamp,
+)
 from app.utils.reasoning_text import (
     split_content_and_reasoning,
     sse_data_payload,
@@ -88,11 +94,23 @@ class OpenAIClient(BaseAIClient):
         tool_choice: Optional[str] = None,
         stream: bool = False,
     ) -> Dict[str, Any]:
+        # 收敛 max_tokens：存量脏值（如 DB 里的 1000000）直接透传会被上游 400/422。
+        # 未入表的模型走 DEFAULT 兜底（32768），不会误伤写正文路径的 16000。
+        limit = MODEL_MAX_OUTPUT_TOKENS.get(model, DEFAULT_MAX_OUTPUT_TOKENS)
+        effective_max_tokens = clamp_max_output_tokens(model, max_tokens)
+        if effective_max_tokens != max_tokens and should_warn_max_tokens_clamp(
+            model, max_tokens, limit
+        ):
+            logger.warning(
+                "max_tokens %s 超出模型 %s 的上限 %s，已收敛为 %s（同组合仅告警一次）",
+                max_tokens, model, limit, effective_max_tokens,
+            )
+
         payload = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": effective_max_tokens,
         }
         # 合并额外请求体参数（如关闭思考: chat_template_kwargs={"enable_thinking": False}）
         if self.extra_body:

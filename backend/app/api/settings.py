@@ -542,6 +542,8 @@ async def test_system_smtp_settings(
             text_body=text_body,
             html_body=html_body,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception(f"SMTP 测试邮件发送失败: {exc}")
         raise HTTPException(status_code=400, detail=f"SMTP 测试邮件发送失败: {str(exc)}") from exc
@@ -989,6 +991,8 @@ async def check_function_calling_support(data: ApiTestRequest):
             ]
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         error_msg = str(e)
         error_type = type(e).__name__
@@ -1162,6 +1166,8 @@ async def test_api_connection(data: ApiTestRequest):
             ]
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         # 其他错误
         error_msg = str(e)

@@ -4,6 +4,7 @@ from typing import Optional
 from pathlib import Path
 import logging
 import os
+import re
 import uuid
 
 # 在模块级 os.getenv 之前显式加载 .env。
@@ -69,12 +70,30 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # 配置模块使用标准logging（在logger.py初始化之前）
 config_logger = logging.getLogger(__name__)
 
+
+_DB_URL_CREDENTIAL_RE = re.compile(r"://([^:/@]+):([^@/]+)@")
+
+
+def mask_database_url(url: object) -> str:
+    """把 DB URL 里的密码替换为 ***，仅供日志/诊断使用。
+
+    postgresql+asyncpg://user:pass@host:5432/db
+      → postgresql+asyncpg://user:***@host:5432/db
+
+    无凭据段（如 sqlite+aiosqlite:///./data/wenshu.db）原样返回。
+    严禁改写真实连接串，脱敏只在打印路径做。
+    """
+    text = str(url or "")
+    return _DB_URL_CREDENTIAL_RE.sub(r"://\1:***@", text)
+
+
 # 数据库配置：PostgreSQL
 # 从环境变量获取数据库URL
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://wenshu:password@localhost:5432/wenshu")
 
 config_logger.debug(f"数据库类型: PostgreSQL")
-config_logger.debug(f"数据库URL: {DATABASE_URL}")
+# 这里必须脱敏：本行在 DEBUG 级别下会把库密码写进日志文件
+config_logger.debug(f"数据库URL: {mask_database_url(DATABASE_URL)}")
 
 class Settings(BaseSettings):
     """应用配置"""
@@ -99,7 +118,12 @@ class Settings(BaseSettings):
     
     # 数据库配置 - PostgreSQL
     database_url: str = DATABASE_URL
-    
+
+    @property
+    def database_url_safe(self) -> str:
+        """脱敏后的 DB URL，仅供日志/诊断使用（不可用于建立连接）。"""
+        return mask_database_url(self.database_url)
+
     # PostgreSQL连接池配置（优化后支持150-200并发用户）
     database_pool_size: int = 50  # 核心连接池大小（优化：从30提升到50）
     database_max_overflow: int = 30  # 最大溢出连接数（优化：从20提升到30）

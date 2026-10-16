@@ -1,5 +1,5 @@
 """灵感模式API - 通过对话引导创建项目"""
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any
 import json
@@ -484,6 +484,8 @@ async def quick_generate(
             logger.error(f"JSON解析失败: {e}")
             raise Exception("AI返回格式错误，请重试")
     
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"智能补全失败: {e}", exc_info=True)
         return {

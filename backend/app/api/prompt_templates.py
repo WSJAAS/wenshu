@@ -622,6 +622,8 @@ async def preview_template(
             "error": f"缺少必需的参数: {str(e)}",
             "rendered_content": None
         }
+    except HTTPException:
+        raise
     except Exception as e:
         return {
             "success": False,

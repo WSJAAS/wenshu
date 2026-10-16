@@ -14,6 +14,7 @@ from app.models.user import User
 from app.user_manager import user_manager
 from app.user_password import password_manager
 from app.logger import get_logger
+from app.utils.error_detail import safe_detail
 
 logger = get_logger(__name__)
 
@@ -112,7 +113,7 @@ async def get_users(
         }
     except Exception as e:
         logger.error(f"获取用户列表失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"获取用户列表失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="获取用户列表失败", public="获取用户列表失败"))
 
 
 @router.post("/users")
@@ -176,7 +177,7 @@ async def create_user(
         raise
     except Exception as e:
         logger.error(f"创建用户失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"创建用户失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="创建用户失败", public="创建用户失败"))
 
 
 @router.put("/users/{user_id}")
@@ -238,7 +239,7 @@ async def update_user(
         raise
     except Exception as e:
         logger.error(f"更新用户失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"更新用户失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="更新用户失败", public="更新用户失败"))
 
 
 @router.post("/users/{user_id}/toggle-status")
@@ -291,7 +292,7 @@ async def toggle_user_status(
         raise
     except Exception as e:
         logger.error(f"切换用户状态失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"切换用户状态失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="切换用户状态失败", public="切换用户状态失败"))
 
 
 @router.post("/users/{user_id}/reset-password")
@@ -331,7 +332,7 @@ async def reset_password(
         raise
     except Exception as e:
         logger.error(f"重置密码失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"重置密码失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="重置密码失败", public="重置密码失败"))
 
 
 @router.delete("/users/{user_id}")
@@ -390,4 +391,4 @@ async def delete_user(
         raise
     except Exception as e:
         logger.error(f"删除用户失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"删除用户失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="删除用户失败", public="删除用户失败"))

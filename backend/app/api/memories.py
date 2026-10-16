@@ -15,6 +15,7 @@ from app.models.settings import Settings
 from app.api.settings import resolve_runtime_ai_config
 from app.logger import get_logger
 from app.api.common import verify_project_access
+from app.utils.error_detail import safe_detail
 import uuid
 
 logger = get_logger(__name__)
@@ -286,7 +287,7 @@ async def analyze_chapter(
     except Exception as e:
         logger.error(f"❌ 章节分析失败: {str(e)}")
         await db.rollback()
-        raise HTTPException(status_code=500, detail=f"分析失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="章节分析失败", public="章节分析失败"))
 
 
 @router.get("/projects/{project_id}/memories")
@@ -324,9 +325,11 @@ async def get_project_memories(
             "total": len(memories)
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ 获取记忆失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="获取记忆失败", public="获取记忆列表失败"))
 
 
 @router.get("/projects/{project_id}/analysis/{chapter_id}")
@@ -365,7 +368,7 @@ async def get_chapter_analysis(
         raise
     except Exception as e:
         logger.error(f"❌ 获取分析失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="获取分析失败", public="获取章节分析失败"))
 
 
 @router.post("/projects/{project_id}/search")
@@ -401,9 +404,11 @@ async def search_memories(
             "total": len(memories)
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ 搜索记忆失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="搜索记忆失败", public="搜索记忆失败"))
 
 
 @router.get("/projects/{project_id}/foreshadows")
@@ -433,9 +438,11 @@ async def get_unresolved_foreshadows(
             "total": len(foreshadows)
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ 获取伏笔失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="获取伏笔失败", public="获取未完结伏笔失败"))
 
 
 @router.get("/projects/{project_id}/stats")
@@ -461,9 +468,11 @@ async def get_memory_stats(
             "stats": stats
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ 获取统计失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="获取统计失败", public="获取记忆统计失败"))
 
 
 @router.delete("/projects/{project_id}/chapters/{chapter_id}/memories")
@@ -508,7 +517,9 @@ async def delete_chapter_memories(
             "message": f"已删除{len(memories)}条记忆"
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ 删除记忆失败: {str(e)}")
         await db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="删除记忆失败", public="删除章节记忆失败"))

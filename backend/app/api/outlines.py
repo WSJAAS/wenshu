@@ -2824,6 +2824,8 @@ async def create_single_chapter_from_outline(
             }
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"一对一创建章节失败: {str(e)}", exc_info=True)
         await db.rollback()

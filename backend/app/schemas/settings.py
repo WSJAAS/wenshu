@@ -13,6 +13,10 @@ class SettingsBase(BaseModel):
     api_base_url: Optional[str] = Field(default=None, description="自定义API地址")
     llm_model: Optional[str] = Field(default="gpt-4", description="模型名称")
     temperature: Optional[float] = Field(default=0.7, ge=0.0, le=2.0, description="温度参数")
+    # 注意：上界不写在这里。SettingsBase 同时是 SettingsResponse 的基类，
+    # 若在基类加 le，存量脏值（如 DB 里的 1000000）会让「读取设置」序列化失败 → 500。
+    # 上界只强制在写入侧（SettingsCreate / SettingsUpdate），读取侧放行存量值，
+    # 由 ai_config.MODEL_MAX_OUTPUT_TOKENS 在调用时收敛。
     max_tokens: Optional[int] = Field(default=2000, ge=1, description="最大token数")
     system_prompt: Optional[str] = Field(default=None, description="系统级别提示词，每次AI调用都会使用")
     disable_thinking: Optional[bool] = Field(default=False, description="关闭模型思考：思考型模型跳过思考阶段直接输出正文，减少token消耗与等待时间")
@@ -26,12 +30,13 @@ class SettingsBase(BaseModel):
 
 class SettingsCreate(SettingsBase):
     """创建设置请求模型"""
-    pass
+    # 写入侧强制上界：拦住 1000000 这类脏值进库。
+    max_tokens: Optional[int] = Field(default=2000, ge=1, le=100000, description="最大token数")
 
 
 class SettingsUpdate(SettingsBase):
     """更新设置请求模型"""
-    pass
+    max_tokens: Optional[int] = Field(default=2000, ge=1, le=100000, description="最大token数")
 
 
 class SettingsResponse(SettingsBase):
@@ -96,7 +101,7 @@ class APIKeyPresetConfig(BaseModel):
     api_base_url: Optional[str] = Field(None, description="自定义API地址")
     llm_model: str = Field(..., description="模型名称")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="温度参数")
-    max_tokens: int = Field(default=2000, ge=1, description="最大token数")
+    max_tokens: int = Field(default=2000, ge=1, le=100000, description="最大token数")
     system_prompt: Optional[str] = Field(default=None, description="系统级别提示词")
 
 

@@ -1,7 +1,14 @@
 """Gemini 客户端"""
 from typing import Any, AsyncGenerator, Dict, List, Optional
 import httpx
-from app.services.ai_config import AIClientConfig, default_config
+from app.services.ai_config import (
+    AIClientConfig,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    MODEL_MAX_OUTPUT_TOKENS,
+    clamp_max_output_tokens,
+    default_config,
+    should_warn_max_tokens_clamp,
+)
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -82,9 +89,20 @@ class GeminiClient:
             role = "user" if msg["role"] == "user" else "model"
             contents.append({"role": role, "parts": [{"text": msg["content"]}]})
         
+        # 收敛 maxOutputTokens：存量脏值直接透传会被上游 400/422
+        limit = MODEL_MAX_OUTPUT_TOKENS.get(model, DEFAULT_MAX_OUTPUT_TOKENS)
+        effective_max_tokens = clamp_max_output_tokens(model, max_tokens)
+        if effective_max_tokens != max_tokens and should_warn_max_tokens_clamp(
+            model, max_tokens, limit
+        ):
+            logger.warning(
+                "max_tokens %s 超出模型 %s 的上限 %s，已收敛为 %s（同组合仅告警一次）",
+                max_tokens, model, limit, effective_max_tokens,
+            )
+
         payload = {
             "contents": contents,
-            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}
+            "generationConfig": {"temperature": temperature, "maxOutputTokens": effective_max_tokens}
         }
         if system_prompt:
             payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
@@ -160,9 +178,20 @@ class GeminiClient:
             role = "user" if msg["role"] == "user" else "model"
             contents.append({"role": role, "parts": [{"text": msg["content"]}]})
         
+        # 收敛 maxOutputTokens：存量脏值直接透传会被上游 400/422
+        limit = MODEL_MAX_OUTPUT_TOKENS.get(model, DEFAULT_MAX_OUTPUT_TOKENS)
+        effective_max_tokens = clamp_max_output_tokens(model, max_tokens)
+        if effective_max_tokens != max_tokens and should_warn_max_tokens_clamp(
+            model, max_tokens, limit
+        ):
+            logger.warning(
+                "max_tokens %s 超出模型 %s 的上限 %s，已收敛为 %s（同组合仅告警一次）",
+                max_tokens, model, limit, effective_max_tokens,
+            )
+
         payload = {
             "contents": contents,
-            "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}
+            "generationConfig": {"temperature": temperature, "maxOutputTokens": effective_max_tokens}
         }
         if system_prompt:
             payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}

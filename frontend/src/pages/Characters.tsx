@@ -628,10 +628,10 @@ export default function Characters() {
         position: 'sticky',
         top: 0,
         zIndex: 10,
-        backgroundColor: 'var(--color-bg-container)',
+        backgroundColor: 'var(--ant-color-bg-container)',
         padding: isMobile ? '12px 0' : '16px 0',
         marginBottom: isMobile ? 12 : 16,
-        borderBottom: '1px solid var(--color-border-secondary)',
+        borderBottom: '1px solid var(--ant-color-border-secondary)',
         display: 'flex',
         flexDirection: isMobile ? 'column' : 'row',
         gap: isMobile ? 12 : 0,
@@ -707,9 +707,9 @@ export default function Characters() {
           position: 'sticky',
           top: isMobile ? 60 : 72,
           zIndex: 9,
-          backgroundColor: 'var(--color-bg-container)',
+          backgroundColor: 'var(--ant-color-bg-container)',
           paddingBottom: 8,
-          borderBottom: '1px solid var(--color-border-secondary)',
+          borderBottom: '1px solid var(--ant-color-border-secondary)',
         }}>
           <Tabs
             activeKey={activeTab}
@@ -746,11 +746,11 @@ export default function Characters() {
           position: 'sticky',
           top: isMobile ? 120 : 132,
           zIndex: 8,
-          backgroundColor: 'var(--color-bg-container)',
+          backgroundColor: 'var(--ant-color-bg-container)',
           paddingBottom: 8,
           paddingTop: 8,
           marginTop: 8,
-          borderBottom: selectedCharacters.length > 0 ? '1px solid var(--color-border-secondary)' : 'none',
+          borderBottom: selectedCharacters.length > 0 ? '1px solid var(--ant-color-border-secondary)' : 'none',
         }}>
           <Space>
             <Checkbox

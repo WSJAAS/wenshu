@@ -17,6 +17,7 @@ from app.schemas.prompt_workshop import (
 from app.services.workshop_client import workshop_client, WorkshopClientError
 from app.constants.prompt_categories import PROMPT_CATEGORIES
 from app.logger import get_logger
+from app.utils.error_detail import safe_detail
 
 router = APIRouter(prefix="/prompt-workshop", tags=["prompt-workshop"])
 logger = get_logger(__name__)
@@ -173,7 +174,7 @@ async def get_items(
                 user_identifier=user_identifier
             )
         except WorkshopClientError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail=safe_detail(e, context="获取提示词列表失败", public="获取提示词列表失败，云端工坊暂时不可用"))
 
 
 async def _get_items_local(
@@ -278,7 +279,7 @@ async def get_item(item_id: str, request: Request, db: AsyncSession = Depends(ge
         try:
             return await workshop_client.get_item(item_id, user_identifier=user_identifier)
         except WorkshopClientError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail=safe_detail(e, context="获取提示词详情失败", public="获取提示词详情失败，云端工坊暂时不可用"))
 
 
 @router.post("/items/{item_id}/import")
@@ -317,7 +318,7 @@ async def import_item(
             except Exception as e:
                 logger.warning(f"通知云端下载计数失败: {e}")
         except WorkshopClientError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail=safe_detail(e, context="下载提示词失败", public="下载提示词失败，云端工坊暂时不可用"))
     
     # 创建本地写作风格
     count_result = await db.execute(
@@ -398,7 +399,7 @@ async def toggle_like(
         try:
             return await workshop_client.toggle_like(item_id, user_identifier)
         except WorkshopClientError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail=safe_detail(e, context="点赞失败", public="点赞失败，云端工坊暂时不可用"))
 
 
 @router.post("/items/{item_id}/download")
@@ -496,7 +497,7 @@ async def submit_prompt(
                 data=data.model_dump()
             )
         except WorkshopClientError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail=safe_detail(e, context="提交提示词失败", public="提交提示词失败，云端工坊暂时不可用"))
 
 
 @router.get("/my-submissions")
@@ -530,7 +531,7 @@ async def get_my_submissions(
         try:
             return await workshop_client.get_submissions(user_identifier, status)
         except WorkshopClientError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail=safe_detail(e, context="获取提交记录失败", public="获取提交记录失败，云端工坊暂时不可用"))
 
 
 @router.delete("/submissions/{submission_id}")
@@ -574,7 +575,7 @@ async def withdraw_submission(
         try:
             return await workshop_client.withdraw_submission(submission_id, user_identifier, force)
         except WorkshopClientError as e:
-            raise HTTPException(status_code=503, detail=str(e))
+            raise HTTPException(status_code=503, detail=safe_detail(e, context="撤回提交失败", public="撤回提交失败，云端工坊暂时不可用"))
 
 
 # ==================== 管理员 API（仅云端实例） ====================

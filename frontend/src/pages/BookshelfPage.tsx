@@ -380,10 +380,28 @@ export default function BookshelfPage({
               <div key={project.id} style={{ position: 'relative', width: '100%', minWidth: 0, height: isMobile ? mobileBookHeight : desktopBookHeight }}>
                 <Card
                   hoverable
-                  style={{ ...bookshelfCardStyles.projectCard, height: isMobile ? mobileBookHeight : desktopBookHeight }}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={
+                    isFlipped
+                      ? `作品封面操作：${project.title}`
+                      : `打开作品：${project.title}，${displayStatus}，完成进度 ${progress}%`
+                  }
+                  style={{
+                    ...bookshelfCardStyles.projectCard,
+                    height: isMobile ? mobileBookHeight : desktopBookHeight,
+                    cursor: 'pointer',
+                  }}
                   styles={{ body: { padding: 0, height: '100%', flex: 1, display: 'flex', flexDirection: 'column' } }}
                   {...bookshelfCardHoverHandlers}
                   onClick={() => !isFlipped && onEnterProject(project)}
+                  onKeyDown={(e) => {
+                    if (e.target !== e.currentTarget) return;
+                    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                      e.preventDefault();
+                      if (!isFlipped) onEnterProject(project);
+                    }
+                  }}
                   data-card-style="bookshelf-book"
                   data-book-kind="project"
                 >
@@ -651,6 +669,7 @@ export default function BookshelfPage({
                             <Space wrap>
                               <Button
                                 size="small"
+                                aria-label={`下载封面：《${project.title}》`}
                                 icon={<DownloadOutlined />}
                                 onClick={(e) => { e.stopPropagation(); onDownloadCover(project); }}
                                 disabled={coverActionLoading}
@@ -665,6 +684,7 @@ export default function BookshelfPage({
                               </Button>
                               <Button
                                 size="small"
+                                aria-label={coverActionLoading ? `重新生成中...：《${project.title}》` : `重新生成：《${project.title}》`}
                                 icon={<ReloadOutlined />}
                                 loading={coverActionLoading}
                                 onClick={(e) => void handleGenerateCoverClick(e, project, true)}
@@ -695,6 +715,7 @@ export default function BookshelfPage({
                             <div style={{ color: token.colorTextSecondary, fontSize: 12 }}>{project.cover_error || '请稍后重试'}</div>
                             <Button
                               type="primary"
+                              aria-label={coverActionLoading ? `重新生成中...：《${project.title}》` : `重新生成：《${project.title}》`}
                               icon={<ReloadOutlined />}
                               loading={coverActionLoading}
                               onClick={(e) => void handleGenerateCoverClick(e, project, true)}
@@ -709,6 +730,7 @@ export default function BookshelfPage({
                             <div style={{ color: token.colorTextSecondary }}>当前暂无可用封面</div>
                             <Button
                               type="primary"
+                              aria-label={coverActionLoading ? `生成中...：《${project.title}》` : `生成封面：《${project.title}》`}
                               icon={<PictureOutlined />}
                               loading={coverActionLoading}
                               onClick={(e) => void handleGenerateCoverClick(e, project, true)}
@@ -901,6 +923,7 @@ export default function BookshelfPage({
                                 {!coverReady && (
                                   <Button
                                     size="small"
+                                    aria-label={coverActionLoading ? `生成中...：《${project.title}》` : `生成封面：《${project.title}》`}
                                     icon={<PictureOutlined />}
                                     loading={coverActionLoading}
                                     onClick={(e) => void handleGenerateCoverClick(e, project, true)}
@@ -920,6 +943,7 @@ export default function BookshelfPage({
                                   size="small"
                                   danger
                                   icon={<DeleteOutlined style={{ fontSize: isMobile ? 12 : 14 }} />}
+                                  aria-label={`删除作品《${project.title}》`}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     onDeleteProject(project.id);

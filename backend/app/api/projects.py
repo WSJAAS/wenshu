@@ -37,6 +37,7 @@ from app.utils.data_consistency import (
     fix_missing_organization_records,
     fix_organization_member_counts
 )
+from app.utils.error_detail import safe_detail
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/projects", tags=["项目管理"])
@@ -434,7 +435,7 @@ async def export_project_chapters(
         raise
     except Exception as e:
         logger.error(f"导出项目失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="导出项目失败", public="导出项目失败"))
 
 
 @router.post("/{project_id}/check-consistency", summary="检查数据一致性")
@@ -488,7 +489,7 @@ async def check_project_consistency(
         raise
     except Exception as e:
         logger.error(f"数据一致性检查失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"检查失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="数据一致性检查失败", public="数据一致性检查失败"))
 
 
 @router.post("/{project_id}/fix-organizations", summary="修复组织记录")
@@ -537,7 +538,7 @@ async def fix_project_organizations(
         raise
     except Exception as e:
         logger.error(f"修复组织记录失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"修复失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="修复组织记录失败", public="修复组织记录失败"))
 
 
 @router.post("/{project_id}/fix-member-counts", summary="修复成员计数")
@@ -586,7 +587,7 @@ async def fix_project_member_counts(
         raise
     except Exception as e:
         logger.error(f"修复成员计数失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"修复失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="修复成员计数失败", public="修复成员计数失败"))
 
 
 @router.post("/{project_id}/export-data", summary="导出项目数据为JSON")
@@ -669,7 +670,7 @@ async def export_project_data(
         raise
     except Exception as e:
         logger.error(f"导出项目数据失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"导出失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="导出项目数据失败", public="导出项目数据失败"))
 
 
 @router.post("/validate-import", response_model=ImportValidationResult, summary="验证导入文件")
@@ -716,7 +717,7 @@ async def validate_import_file(
         raise
     except Exception as e:
         logger.error(f"验证导入文件失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"验证失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="验证导入文件失败", public="验证导入文件失败"))
 
 
 @router.post("/import", response_model=ImportResult, summary="导入项目")
@@ -775,4 +776,4 @@ async def import_project(
         raise
     except Exception as e:
         logger.error(f"导入项目失败: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=safe_detail(e, context="导入项目失败", public="导入项目失败"))

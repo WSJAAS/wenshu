@@ -137,6 +137,17 @@ const ChapterContentComparison: React.FC<ChapterContentComparisonProps> = ({
     }
   };
 
+  const confirmApply = () => {
+    modal.confirm({
+      title: '确认应用新内容',
+      content: '将用新内容覆盖该章节正文。此操作会替换当前正文，请确认已核对差异。',
+      centered: true,
+      okText: '确认应用',
+      cancelText: '取消',
+      onOk: handleApply,
+    });
+  };
+
   const handleDiscard = () => {
     modal.confirm({
       title: '确认放弃',
@@ -184,7 +195,7 @@ const ChapterContentComparison: React.FC<ChapterContentComparisonProps> = ({
           type="primary"
           icon={<CheckOutlined />}
           loading={applying}
-          onClick={handleApply}
+          onClick={confirmApply}
         >
           应用新内容
         </Button>
@@ -212,7 +223,7 @@ const ChapterContentComparison: React.FC<ChapterContentComparisonProps> = ({
               title="字数变化"
               value={wordCountDiff}
               suffix="字"
-              valueStyle={{ color: wordCountDiff > 0 ? 'var(--color-success)' : 'var(--color-error)' }}
+              valueStyle={{ color: wordCountDiff > 0 ? 'var(--ant-color-success)' : 'var(--ant-color-error)' }}
               prefix={wordCountDiff > 0 ? '+' : ''}
             />
           </Col>
@@ -221,7 +232,7 @@ const ChapterContentComparison: React.FC<ChapterContentComparisonProps> = ({
               title="变化比例"
               value={wordCountDiffPercent}
               suffix="%"
-              valueStyle={{ color: Math.abs(parseFloat(wordCountDiffPercent)) < 10 ? 'var(--color-primary)' : 'var(--color-warning)' }}
+              valueStyle={{ color: Math.abs(parseFloat(wordCountDiffPercent)) < 10 ? 'var(--ant-color-primary)' : 'var(--ant-color-warning)' }}
               prefix={wordCountDiff > 0 ? '+' : ''}
             />
           </Col>
