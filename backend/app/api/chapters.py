@@ -1744,11 +1744,11 @@ async def generate_chapter_content_stream(
                 # ⚡ Skill 支持：当指定 skill_key 时，将 Skill 工作流注入系统提示词
                 if skill_key:
                     try:
-                        from app.services.skill_loader import get_all_skills_cached
+                        from app.services.skill_loader import get_all_skills_cached, truncate_for_injection
                         skills = get_all_skills_cached()
                         skill = next((s for s in skills if s["template_key"] == skill_key), None)
                         if skill:
-                            skill_content = skill["content"]
+                            skill_content = truncate_for_injection(skill["content"])
                             skill_name = skill["template_name"]
                             system_prompt_with_style = f"""【⚡ Skill 工作流：{skill_name}】
 
@@ -2783,11 +2783,11 @@ async def _run_chapter_generation_bg(
     system_prompt_with_style = None
     if skill_key:
         try:
-            from app.services.skill_loader import get_all_skills_cached
+            from app.services.skill_loader import get_all_skills_cached, truncate_for_injection
             skills = get_all_skills_cached()
             skill = next((s for s in skills if s["template_key"] == skill_key), None)
             if skill:
-                skill_content = skill["content"]
+                skill_content = truncate_for_injection(skill["content"])
                 skill_name = skill["template_name"]
                 system_prompt_with_style = f"""【⚡ Skill 工作流：{skill_name}】
 
@@ -2932,12 +2932,13 @@ async def _run_chapter_generation_bg(
     })
     await tracker.analyzing(0, "章节创作完成，准备分析...")
 
+    # 不传 ai_service：让分析走 get_user_ai_service_from_db_by_usage("chapter_analysis")，
+    # 尊重用户配置的分析专用模型（见 docs/待办.md 需求与 settings.py:282）
     analysis_success = await analyze_chapter_background(
         chapter_id=chapter_id,
         user_id=user_id,
         project_id=current_chapter.project_id,
         task_id=analysis_task.id,
-        ai_service=ai_service,
         progress_callback=tracker.analyzing,
     )
     if not analysis_success:
@@ -4319,11 +4320,11 @@ async def generate_single_chapter_for_batch(
     # ⚡ Skill 支持
     if skill_key:
         try:
-            from app.services.skill_loader import get_all_skills_cached
+            from app.services.skill_loader import get_all_skills_cached, truncate_for_injection
             skills = get_all_skills_cached()
             skill = next((s for s in skills if s["template_key"] == skill_key), None)
             if skill:
-                skill_content = skill["content"]
+                skill_content = truncate_for_injection(skill["content"])
                 skill_name = skill["template_name"]
                 system_prompt_with_style = f"""【⚡ Skill 工作流：{skill_name}】
 

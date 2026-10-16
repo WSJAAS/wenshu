@@ -5,7 +5,7 @@ import type { ThemeMode } from './themeStorage';
 export type ResolvedThemeMode = Exclude<ThemeMode, 'system'>;
 
 const sharedToken: ThemeConfig['token'] = {
-  colorPrimary: '#4D8088',
+  colorPrimary: '#4D6BFE',
   borderRadius: 8,
   wireframe: false,
   fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif",

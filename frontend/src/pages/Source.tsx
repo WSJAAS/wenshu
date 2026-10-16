@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -34,11 +34,12 @@ import {
   WarningOutlined,
   LinkOutlined,
 } from '@ant-design/icons';
-import { sourceApi, bookImportApi, extDownloadApi } from '../services/api';
+import { sourceApi, bookImportApi, extDownloadApi, downloadApi } from '../services/api';
+import { eventBus, EventNames } from '../store/eventBus';
+import SourceBookLookup from '../components/SourceBookLookup';
 import type {
   BookImportTask,
-  ExtDownloadJob,
-  ExtDownloadStatus,
+  DownloadJob,
   SourceChapterResult,
   SourceLoginState,
   SourceTask,
@@ -89,47 +90,22 @@ const BOOK_IMPORT_STATUS_LABEL: Record<string, string> = {
   cancelled: '已取消',
 };
 
-/** 外部下载器（整本下载）的任务状态文案 */
-const EXT_STATE_META: Record<string, { color: string; label: string }> = {
+/**
+ * 下载管理器（download_jobs）的任务状态文案。
+ * 比外部下载器多出 cancelled / lost 两个终态：
+ * lost = 外部下载器重启丢了内存态，任务是否已落盘无从得知。
+ */
+const DOWNLOAD_STATE_META: Record<string, { color: string; label: string }> = {
   queued: { color: 'default', label: '排队中' },
   running: { color: 'processing', label: '下载中' },
   done: { color: 'success', label: '已完成' },
   error: { color: 'error', label: '失败' },
+  cancelled: { color: 'default', label: '已取消' },
+  lost: { color: 'warning', label: '状态丢失' },
 };
 
-/** 终态：到了这里就不用再轮询 */
-const EXT_TERMINAL_STATES = ['done', 'error'];
-
-/**
- * 把 status 响应归一到 ExtDownloadStatus。
- *
- * 约定的形状是 `{ job: { id, state, ... }, epub_path, epub_bytes }`；
- * 但状态接口也可能把 job 的字段摊在顶层（`state` / `progress` / `title`
- * 直接挂在根上）。两种都认，免得界面上的进度永远空着。
- */
-function normalizeExtStatus(raw: unknown): ExtDownloadStatus | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const data = raw as Partial<ExtDownloadStatus> & Partial<ExtDownloadJob> & { job_id?: number };
-
-  if (data.job && typeof data.job === 'object') {
-    return data as ExtDownloadStatus;
-  }
-  if (typeof data.state !== 'string') return null;
-
-  return {
-    job: {
-      // 摊平形状里任务号在根上叫 job_id
-      id: typeof data.id === 'number' ? data.id : data.job_id,
-      state: data.state,
-      title: data.title,
-      author: data.author,
-      error: data.error,
-      progress: data.progress,
-    },
-    epub_path: data.epub_path ?? null,
-    epub_bytes: data.epub_bytes ?? null,
-  };
-}
+/** 终态：到了这里就不再轮询同步 */
+const DOWNLOAD_TERMINAL_STATES = ['done', 'error', 'cancelled', 'lost'];
 
 /**
  * 从「书籍 ID 或链接」里取出数字 book_id。
@@ -183,16 +159,16 @@ export default function Source() {
   /** 交接后拆书模块那边的任务状态。用于显示对方的反应。 */
   const [importTask, setImportTask] = useState<BookImportTask | null>(null);
 
-  // ---- 整本下载（外部下载器）----
-  const [extInput, setExtInput] = useState('');
-  const [extStarting, setExtStarting] = useState(false);
-  const [extJobId, setExtJobId] = useState<number | null>(null);
-  const [extStatus, setExtStatus] = useState<ExtDownloadStatus | null>(null);
-  const [extError, setExtError] = useState('');
-  /** 每发起一次任务自增。job_id 偶然重复时也能让轮询重新起跑。 */
-  const [extRunSeq, setExtRunSeq] = useState(0);
-  /** 轮询是否还在跑。用它挡住重复点击，并保证卸载后不再 setState。 */
-  const extPolling = useRef(false);
+  // ---- 下载管理器（整本下载任务落库）----
+  // 任务记录由后端 download_jobs 表保存，页面刷新不丢。
+  // 前端只负责：发起任务、轮询列表（仅在有非终态任务时）、按任务操作。
+  const [dlInput, setDlInput] = useState('');
+  const [dlStarting, setDlStarting] = useState(false);
+  const [dlJobs, setDlJobs] = useState<DownloadJob[]>([]);
+  /** 已交接任务的拆书侧状态，key = import_task_id。照抄取源任务的 importTask 模式，但按任务分槽。 */
+  const [dlImportTasks, setDlImportTasks] = useState<Record<string, BookImportTask>>({});
+  /** 正在执行交接/取消操作的任务 id，用于按钮 loading */
+  const [dlBusy, setDlBusy] = useState<Record<string, boolean>>({});
 
   const sourceStyle = {
     '--source-bg': token.colorBgContainer,
@@ -203,11 +179,6 @@ export default function Source() {
     '--source-tint': token.colorPrimaryBg,
     '--source-hover': token.colorFillQuaternary,
   } as CSSProperties;
-
-  useEffect(() => () => {
-    // 卸载后立刻停掉整本下载的轮询，避免继续打后端。
-    extPolling.current = false;
-  }, []);
 
   // ---- 模块状态 ----
   useEffect(() => {
@@ -311,84 +282,141 @@ export default function Source() {
     }
   };
 
-  // ---- 整本下载（外部下载器）----
-  // 外部下载器负责整本抓取（含锁定章全文）并把结果打包，
-  // 前端只做两件事：起任务、看着它跑完，然后给出 TXT 导出入口。
-  const extState = extStatus?.job?.state ?? '';
+  // ---- 下载管理器 ----
+  // 外部下载器负责整本抓取（含锁定章全文）并把结果打包；
+  // 本系统的 download_jobs 表负责记住任务与拆书交接状态。
+  // 前端只做三件事：发起、轮询列表、按任务操作（取消/导出 TXT/交给拆书）。
 
-  const startExtDownload = useCallback(async () => {
-    if (extPolling.current) {
-      msgApi.warning('已有一个整本下载任务在跑，等它结束再发起');
-      return;
-    }
-    const bookId = parseBookId(extInput);
-    if (!bookId) {
-      msgApi.error('没识别出书籍 ID。粘贴番茄书籍链接，或直接填数字 ID');
-      return;
-    }
-
-    setExtStarting(true);
-    setExtError('');
+  /** 拉取任务列表。后端会在返回前惰性同步非终态任务。 */
+  const loadDownloadJobs = useCallback(async () => {
     try {
-      const r = await extDownloadApi.start(bookId);
-      // 先清空上一条任务的进度，否则会短暂显示旧书的章数。
-      setExtStatus(null);
-      setExtJobId(r.job_id);
-      setExtRunSeq((seq) => seq + 1);
-      extPolling.current = true;
-      msgApi.success(`已交给外部下载器，任务 #${r.job_id}`);
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { detail?: string } }; message?: string };
-      const detail = err?.response?.data?.detail || err?.message || '未知原因';
-      setExtError(detail);
-      msgApi.error(`发起整本下载失败：${detail}`);
-    } finally {
-      setExtStarting(false);
+      const list = await downloadApi.jobs(30);
+      setDlJobs(list);
+    } catch {
+      /* 列表失败不打扰用户，下一轮再试 */
     }
-  }, [extInput, msgApi]);
+  }, []);
 
-  // 轮询任务状态：每 2s 一次，done / error 即停。
+  // 首载拉一次；之后仅当存在非终态任务时每 3s 轮询。
+  const dlHasActive = dlJobs.some((j) => !DOWNLOAD_TERMINAL_STATES.includes(j.state));
   useEffect(() => {
-    if (extJobId === null || !extPolling.current) return;
+    if (!enabled) return;
+    void loadDownloadJobs();
+  }, [enabled, loadDownloadJobs]);
+
+  useEffect(() => {
+    if (!enabled || !dlHasActive) return;
+    const timer = window.setInterval(() => void loadDownloadJobs(), 3000);
+    return () => window.clearInterval(timer);
+  }, [enabled, dlHasActive, loadDownloadJobs]);
+
+  // 交接动作后其它页面（拆书页）可能在意，发事件通知。
+  useEffect(() => {
+    const onChanged = () => void loadDownloadJobs();
+    eventBus.on(EventNames.DOWNLOAD_JOBS_CHANGED, onChanged);
+    return () => eventBus.off(EventNames.DOWNLOAD_JOBS_CHANGED, onChanged);
+  }, [loadDownloadJobs]);
+
+  // 已交接任务：轮询拆书侧状态（照抄取源任务的 importTask 轮询模式，
+  // 但下载管理器是多任务，所以按 import_task_id 分槽存）。
+  // 只盯「未终态」的交接；终态后把最后一次结果留在 dlImportTasks 里展示。
+  const dlPendingImportIds = dlJobs
+    .filter((j) => j.import_status === 'handed' && j.import_task_id)
+    .map((j) => j.import_task_id)
+    .filter((id) => {
+      const t = dlImportTasks[id];
+      return !t || !['completed', 'failed', 'cancelled'].includes(t.status);
+    });
+
+  useEffect(() => {
+    if (!dlPendingImportIds.length) return;
     let stopped = false;
-    let timer = 0;
-
     const tick = async () => {
-      try {
-        const s = normalizeExtStatus(await extDownloadApi.getStatus(extJobId));
-        if (stopped || !s) return;
-        setExtStatus(s);
-        const state = s.job?.state;
-        if (state && EXT_TERMINAL_STATES.includes(state)) {
-          // 先停轮询再提示，避免下一次 tick 又把终态重放一遍。
-          stopped = true;
-          extPolling.current = false;
-          window.clearInterval(timer);
-          if (state === 'error') {
-            const reason = s.job?.error || '外部下载器未给出原因';
-            setExtError(reason);
-            msgApi.error(`整本下载失败：${reason}`);
-          } else {
-            msgApi.success(`《${s.job?.title || '该书'}》整本下载完成，可下载 TXT`);
-          }
-        }
-      } catch {
-        /* 单次轮询失败静默重试，任务本身还在跑 */
-      }
+      const results = await Promise.all(
+        dlPendingImportIds.map((id) =>
+          bookImportApi.getTaskStatus(id).catch(() => null)
+        )
+      );
+      if (stopped) return;
+      setDlImportTasks((prev) => {
+        const next = { ...prev };
+        results.forEach((t) => {
+          if (t) next[t.task_id] = t;
+        });
+        return next;
+      });
     };
-
-    timer = window.setInterval(tick, 2000);
     void tick();
-
+    const timer = window.setInterval(tick, 3000);
     return () => {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [extJobId, extRunSeq, msgApi]);
+    // dlPendingImportIds 每次渲染都会新建数组；用 join 后的串做依赖才稳定。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dlPendingImportIds.join(',')]);
 
-  const downloadExtTxt = () => {
-    if (extJobId === null) return;
-    window.open(extDownloadApi.resultUrl(extJobId, extStatus?.job?.title), '_blank');
+  const startDownload = useCallback(async () => {
+    const bookId = parseBookId(dlInput);
+    if (!bookId) {
+      msgApi.error('没识别出书籍 ID。粘贴番茄书籍链接，或直接填数字 ID');
+      return;
+    }
+    setDlStarting(true);
+    try {
+      const job = await downloadApi.start({ book_id: bookId, auto_import: true });
+      msgApi.success(`已提交下载任务《${job.book_title || bookId}》，下载器排队执行`);
+      setDlInput('');
+      await loadDownloadJobs();
+      eventBus.emit(EventNames.DOWNLOAD_JOBS_CHANGED);
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } }; message?: string };
+      msgApi.error(`发起下载失败：${err?.response?.data?.detail || err?.message || '未知原因'}`);
+    } finally {
+      setDlStarting(false);
+    }
+  }, [dlInput, msgApi, loadDownloadJobs]);
+
+  const cancelDownloadJob = async (job: DownloadJob) => {
+    setDlBusy((prev) => ({ ...prev, [job.id]: true }));
+    try {
+      await downloadApi.cancel(job.id);
+      msgApi.info('已请求取消');
+      await loadDownloadJobs();
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } }; message?: string };
+      msgApi.error(`取消失败：${err?.response?.data?.detail || err?.message}`);
+    } finally {
+      setDlBusy((prev) => ({ ...prev, [job.id]: false }));
+    }
+  };
+
+  /** 导出 TXT：走后端现成的 resultUrl（外部 job id 是数字字符串） */
+  const downloadJobTxt = (job: DownloadJob) => {
+    const extId = Number(job.ext_job_id);
+    if (!Number.isFinite(extId)) {
+      msgApi.error('该任务缺少外部任务号，无法导出 TXT');
+      return;
+    }
+    window.open(extDownloadApi.resultUrl(extId, job.book_title), '_blank');
+  };
+
+  /** 交给拆书导入（手动/重新交接共用入口，后端幂等） */
+  const handoffDownloadJob = async (job: DownloadJob) => {
+    setDlBusy((prev) => ({ ...prev, [job.id]: true }));
+    try {
+      const r = await downloadApi.toBookImport(job.id);
+      msgApi.success(
+        `已交给拆书导入（${r.txt_chars} 字），拆书任务 ${r.import_task_id.slice(0, 8)}…`
+      );
+      await loadDownloadJobs();
+      eventBus.emit(EventNames.DOWNLOAD_JOBS_CHANGED);
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } }; message?: string };
+      msgApi.error(`交接失败：${err?.response?.data?.detail || err?.message}`);
+    } finally {
+      setDlBusy((prev) => ({ ...prev, [job.id]: false }));
+    }
   };
 
   const handoff = async () => {
@@ -456,8 +484,8 @@ export default function Source() {
         <div>
           <Link to="/" className="source-back"><ArrowLeftOutlined /> 返回书架</Link>
           <div className="source-eyebrow"><BookOutlined /> 发现好故事</div>
-          <Title level={2} className="source-title">在线书源 · 整本下载</Title>
-          <Text type="secondary">粘贴书籍链接或 ID，整本取回全文（含锁定章）。</Text>
+          <Title level={2} className="source-title">在线书源</Title>
+          <Text type="secondary">按书名查找，或粘贴番茄链接，先看看封面和简介。</Text>
         </div>
         <Space wrap>
           {/* 去番茄的入口。找书、复制链接都要在那边操作，
@@ -472,6 +500,11 @@ export default function Source() {
           </Button>
         </Space>
       </header>
+
+      <SourceBookLookup onSelect={(book) => {
+        setDlInput(book.book_id);
+        document.getElementById('source-download-manager')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }} />
 
       {/* ---------- 登录态 ----------
           登录态 Cookie 只影响「免费章区间」的逐章抓取通道。
@@ -506,39 +539,37 @@ export default function Source() {
         </div>
       )}
 
-      {/* ---------- 整本下载（外部下载器）----------
-          本页的主入口。走 App 接口整本抓取，锁定章也是全文，
-          抓完打包，再导出 TXT 交给拆书导入。 */}
+      {/* ---------- 下载管理器（整本下载）----------
+          本页的主入口。走 App 接口整本抓取，锁定章也是全文。
+          任务落库（download_jobs），列表实时显示进度与拆书交接状态；
+          完成后可导出 TXT，也可一键（或自动）交给拆书导入。 */}
       <Card
+        id="source-download-manager"
         size="small"
-        title={<Space><Text strong>整本下载</Text>
-          {extState && (
-            <Tag color={EXT_STATE_META[extState]?.color}>
-              {EXT_STATE_META[extState]?.label || extState}
-            </Tag>
-          )}
+        title={<Space><Text strong>下载管理器</Text>
+          {dlHasActive && <Tag color="processing">有任务进行中</Tag>}
         </Space>}
         style={{ marginBottom: 16 }}
       >
         <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
           走 App 接口整本抓取，锁定章也是全文（实测 550 章 / 120 万字 / 约 1 分钟）。
-          下载完成后可导出 TXT 交给拆书导入。
+          下载完成后会自动交给拆书导入，也可手动导出 TXT。
         </Text>
 
         <Space.Compact style={{ width: '100%', maxWidth: 720, marginTop: 12 }}>
           <Input
             aria-label="书籍 ID 或链接"
-            value={extInput}
-            onChange={(e) => setExtInput(e.target.value)}
-            onPressEnter={() => void startExtDownload()}
+            value={dlInput}
+            onChange={(e) => setDlInput(e.target.value)}
+            onPressEnter={() => void startDownload()}
             placeholder="书籍 ID 或链接（如 https://fanqienovel.com/page/7231424472606051384）"
             allowClear
           />
           <Button
             type="primary"
             icon={<CloudDownloadOutlined />}
-            loading={extStarting}
-            onClick={() => void startExtDownload()}
+            loading={dlStarting}
+            onClick={() => void startDownload()}
           >
             下载整本
           </Button>
@@ -546,74 +577,225 @@ export default function Source() {
 
         <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
           在番茄网页上打开要下的书，把地址栏链接粘到这里即可；也可以直接填数字 ID。
-          同一时间只跑一个任务，抓取由外部下载器完成，本页只显示进度。
+          下载器会排队执行，可同时提交多本。
         </Paragraph>
 
-        {extError && (
-          <Alert
-            type="error"
-            showIcon
+        {dlJobs.length > 0 && (
+          <List
+            size="small"
             style={{ marginTop: 12 }}
-            message="整本下载失败"
-            description={<Text type="secondary" style={{ fontSize: 12 }}>{extError}</Text>}
+            dataSource={dlJobs}
+            renderItem={(job) => {
+              const meta = DOWNLOAD_STATE_META[job.state] || { color: 'default', label: job.state };
+              const isTerminal = DOWNLOAD_TERMINAL_STATES.includes(job.state);
+              const pct = job.chapter_total
+                ? Math.round((job.saved_chapters / job.chapter_total) * 100)
+                : 0;
+              const importTask = job.import_task_id ? dlImportTasks[job.import_task_id] : undefined;
+              return (
+                <List.Item style={{ display: 'block', padding: '12px 0' }}>
+                  <Row gutter={[12, 8]} align="middle">
+                    <Col flex="auto">
+                      <Space wrap size={8}>
+                        <Tag color={meta.color}>{meta.label}</Tag>
+                        <Text strong style={{ fontSize: 13 }}>
+                          {job.book_title || `书籍 ${job.book_id}`}
+                        </Text>
+                        {job.book_author && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>（{job.book_author}）</Text>
+                        )}
+                      </Space>
+                      {!isTerminal && job.chapter_total > 0 && (
+                        <Progress
+                          percent={pct}
+                          size="small"
+                          status={job.state === 'error' ? 'exception' : 'active'}
+                          style={{ marginTop: 6 }}
+                        />
+                      )}
+                      <div style={{ marginTop: 4 }}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {job.chapter_total > 0
+                            ? `${job.saved_chapters} / ${job.chapter_total} 章`
+                            : (job.message || '等待下载器响应…')}
+                          {job.group_total > 0 && ` · 分批 ${job.group_done} / ${job.group_total}`}
+                          {job.txt_chars > 0 && ` · 正文约 ${(job.txt_chars / 10000).toFixed(1)} 万字`}
+                          {job.state === 'done' && job.epub_bytes > 0 &&
+                            ` · 打包产物 ${(job.epub_bytes / 1024 / 1024).toFixed(1)} MB`}
+                        </Text>
+                      </div>
+                      {(job.error || (job.state === 'lost' && job.message)) && (
+                        <div style={{ marginTop: 4 }}>
+                          <Text type="danger" style={{ fontSize: 12 }}>
+                            {job.error || job.message}
+                          </Text>
+                        </div>
+                      )}
+                    </Col>
+                    <Col flex="none">
+                      <Space wrap>
+                        {!isTerminal && (
+                          <Popconfirm title="取消这个下载任务？" onConfirm={() => void cancelDownloadJob(job)}>
+                            <Button size="small" icon={<StopOutlined />} danger loading={dlBusy[job.id]}>
+                              取消
+                            </Button>
+                          </Popconfirm>
+                        )}
+                        {job.state === 'done' && (
+                          <>
+                            <Button
+                              size="small"
+                              icon={<SaveOutlined />}
+                              onClick={() => downloadJobTxt(job)}
+                            >
+                              下载 TXT
+                            </Button>
+                            {!job.import_task_id && (
+                              <Button
+                                size="small"
+                                type="primary"
+                                icon={<ImportOutlined />}
+                                loading={dlBusy[job.id]}
+                                onClick={() => void handoffDownloadJob(job)}
+                              >
+                                交给拆书导入
+                              </Button>
+                            )}
+                          </>
+                        )}
+                        {job.state === 'lost' && !job.import_task_id && (
+                          <Tooltip title="外部下载器状态已丢失；若文件已落盘仍可尝试交接">
+                            <Button
+                              size="small"
+                              icon={<ImportOutlined />}
+                              loading={dlBusy[job.id]}
+                              onClick={() => void handoffDownloadJob(job)}
+                            >
+                              交给拆书导入
+                            </Button>
+                          </Tooltip>
+                        )}
+                      </Space>
+                    </Col>
+                  </Row>
+
+                  {/* ---------- 拆书交接状态 ----------
+                      照抄取源任务的 import Alert 样式：交接后显示对方的反应，
+                      失败可重新交接。没有这一块，用户只能凭「已完成」猜后续。 */}
+                  {job.import_status === 'handed' && job.import_task_id && (
+                    <Alert
+                      type="success"
+                      showIcon
+                      icon={<ImportOutlined />}
+                      style={{ marginTop: 8 }}
+                      message={
+                        <Space wrap>
+                          <span>已交给拆书模块</span>
+                          {importTask && (
+                            <Tag color={
+                              importTask.status === 'completed' ? 'green'
+                                : importTask.status === 'failed' ? 'red'
+                                : 'blue'
+                            }>
+                              {BOOK_IMPORT_STATUS_LABEL[importTask.status] || importTask.status}
+                            </Tag>
+                          )}
+                        </Space>
+                      }
+                      description={
+                        <div>
+                          {job.import_message && (
+                            <Paragraph style={{ fontSize: 12, marginBottom: 8 }}>
+                              {job.import_message}
+                            </Paragraph>
+                          )}
+                          {importTask && (
+                            <>
+                              <Progress
+                                percent={importTask.progress ?? 0}
+                                size="small"
+                                status={
+                                  importTask.status === 'failed' ? 'exception'
+                                    : importTask.status === 'completed' ? 'success'
+                                    : 'active'
+                                }
+                              />
+                              {importTask.message && (
+                                <Text type="secondary" style={{ fontSize: 12 }}>
+                                  {importTask.message}
+                                </Text>
+                              )}
+                              {importTask.ai_degraded && (
+                                <div style={{ marginTop: 6 }}>
+                                  <Tag color="orange" icon={<WarningOutlined />}>
+                                    未使用 AI
+                                  </Tag>
+                                  <Text type="secondary" style={{ fontSize: 11 }}>
+                                    产出为规则推断
+                                    {importTask.ai_fallback_reasons?.length
+                                      ? `（${importTask.ai_fallback_reasons.join('、')}）`
+                                      : ''}
+                                  </Text>
+                                </div>
+                              )}
+                            </>
+                          )}
+                          <div style={{ marginTop: 10 }}>
+                            <Space wrap>
+                              <Button
+                                size="small"
+                                icon={<ArrowLeftOutlined rotate={-90} />}
+                                onClick={() => navigate('/?view=book-import')}
+                              >
+                                去拆书模块确认导入
+                              </Button>
+                              <Button
+                                size="small"
+                                icon={<ImportOutlined />}
+                                loading={dlBusy[job.id]}
+                                onClick={() => void handoffDownloadJob(job)}
+                              >
+                                重新交接
+                              </Button>
+                            </Space>
+                          </div>
+                        </div>
+                      }
+                    />
+                  )}
+
+                  {job.import_status === 'failed' && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      icon={<WarningOutlined />}
+                      style={{ marginTop: 8 }}
+                      message="交给拆书模块失败"
+                      description={
+                        <div>
+                          <Paragraph style={{ fontSize: 12, marginBottom: 8 }}>
+                            {job.import_message || '未知原因'}
+                          </Paragraph>
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            下载本身是成功的，正文已保存。可以重试交接。
+                          </Text>
+                          <div style={{ marginTop: 8 }}>
+                            <Button
+                              size="small"
+                              loading={dlBusy[job.id]}
+                              onClick={() => void handoffDownloadJob(job)}
+                            >
+                              重试交接
+                            </Button>
+                          </div>
+                        </div>
+                      }
+                    />
+                  )}
+                </List.Item>
+              );
+            }}
           />
-        )}
-
-        {extJobId !== null && (
-          <div style={{ marginTop: 12 }}>
-            {extStatus?.job?.progress ? (
-              <>
-                <Progress
-                  percent={
-                    extStatus.job.progress.chapter_total
-                      ? Math.round(
-                          (extStatus.job.progress.saved_chapters / extStatus.job.progress.chapter_total) * 100
-                        )
-                      : 0
-                  }
-                  status={
-                    extState === 'error' ? 'exception'
-                      : extState === 'done' ? 'success'
-                      : 'active'
-                  }
-                />
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {extStatus.job.progress.saved_chapters} / {extStatus.job.progress.chapter_total} 章
-                  {' · '}分批 {extStatus.job.progress.group_done} / {extStatus.job.progress.group_total}
-                  {extStatus.job.title && ` · ${extStatus.job.title}`}
-                  {extStatus.job.author && `（${extStatus.job.author}）`}
-                </Text>
-              </>
-            ) : (
-              <Space>
-                <Spin size="small" />
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  任务 #{extJobId} 已提交，正在读取进度…
-                </Text>
-              </Space>
-            )}
-
-            {extState === 'done' && (
-              <div style={{ marginTop: 10 }}>
-                <Space wrap>
-                  <Button
-                    size="small"
-                    type="primary"
-                    icon={<SaveOutlined />}
-                    onClick={downloadExtTxt}
-                  >
-                    下载 TXT
-                  </Button>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    导出后可在拆书模块上传该 TXT 做导入
-                    {extStatus?.epub_bytes
-                      ? `（打包产物 ${(extStatus.epub_bytes / 1024 / 1024).toFixed(1)} MB）`
-                      : ''}
-                  </Text>
-                </Space>
-              </div>
-            )}
-          </div>
         )}
       </Card>
 

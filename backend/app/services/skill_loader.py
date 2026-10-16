@@ -22,6 +22,19 @@ logger = get_logger(__name__)
 # Skills 目录路径：backend/app/skills/ （本文件在 backend/app/services/ 下）
 SKILLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skills")
 
+# ============================================================
+#  注入长度护栏（docs/待办.md TODO-011 / 审计 06 G11-1）
+# ============================================================
+# 背景：load_skills() 会把 references/ 下全部 .md 拼进 content，
+# 实测 story-long-write content = 361,412 字符（≈54万–72万 token），
+# 选中即超上下文窗口 → 请求必然失败。
+# 30,000 对齐 project_agent_service.py:215 既有先例，让四条路径行为一致。
+SKILL_INJECTION_CHAR_LIMIT = 30_000
+
+# 保存/更新时的单份内容上限（防止未来再塞进 1MB 的 skill）。
+SKILL_BODY_CHAR_LIMIT = 200_000
+SKILL_REFERENCE_CHAR_LIMIT = 200_000
+
 
 class _SkillYamlDumper(yaml.SafeDumper):
     pass
@@ -154,6 +167,42 @@ def _get_references(skill_dir: str) -> Dict[str, str]:
                 logger.warning(f"读取参考文件失败: {filepath}, 错误: {e}")
     
     return references
+
+
+def _build_truncation_notice(original_length: int, limit: int) -> str:
+    """生成"内容被裁剪"的醒目提示（D5：必须是可感知的，不能静默降级）。"""
+    return (
+        f"\n\n【⚠️ Skill 内容超长，已截断：原文 {original_length} 字符，"
+        f"仅注入前 {limit} 字符。参考资料库未完整载入，"
+        f"如需完整内容请在 Skill 管理页查看或拆分该 Skill。】"
+    )
+
+
+def truncate_for_injection(
+    content: str,
+    limit: int = SKILL_INJECTION_CHAR_LIMIT,
+) -> str:
+    """skill content 注入 system_prompt 前的统一截断。
+
+    截断时在尾部追加醒目标记，让用户可感知（而非静默功能降级）。
+
+    Args:
+        content: skill 的完整 content（body + references 拼接结果）
+        limit: 保留的最大字符数，默认 SKILL_INJECTION_CHAR_LIMIT
+
+    Returns:
+        未超限时**原样返回**（不改字、不 strip、不加标记）；
+        超限时返回「前 keep 字符 + 截断标记」，总长 ≤ limit。
+        唯一例外：limit 小于标记自身长度（如调用方传 10）——此时
+        以「可感知」优先，宁可略超 limit 也不静默丢信号。
+    """
+    text = content or ""
+    if len(text) <= limit:
+        return text
+    # 截断标记本身也占用预算，先从正文里让出来，保证返回总长仍 ≤ limit。
+    notice = _build_truncation_notice(len(text), limit)
+    keep = max(limit - len(notice), 0)
+    return text[:keep] + notice
 
 
 def load_skills() -> List[Dict]:
@@ -383,6 +432,25 @@ def _validate_skill_metadata(name: str, display_name: str, category: str, descri
         raise ValueError("工作流指令不能为空")
     if not triggers:
         raise ValueError("至少需要一个触发词")
+    # 长度上限（TODO-011 S9）：防止未来再塞进巨型 skill。
+    if len(body) > SKILL_BODY_CHAR_LIMIT:
+        raise ValueError(
+            f"工作流指令过长：{len(body)} 字符，上限 {SKILL_BODY_CHAR_LIMIT} 字符。"
+            f"请把内容拆分到 references/ 下的多个文件，或拆成多个 Skill。"
+        )
+
+
+def _validate_reference_sizes(references: Optional[Dict[str, str]]) -> None:
+    """校验单个 reference 文件长度（TODO-011 S9）。"""
+    if not references:
+        return
+    for ref_name, ref_content in references.items():
+        length = len(ref_content or "")
+        if length > SKILL_REFERENCE_CHAR_LIMIT:
+            raise ValueError(
+                f"参考资料「{ref_name}」过长：{length} 字符，"
+                f"单份上限 {SKILL_REFERENCE_CHAR_LIMIT} 字符。请拆分该文件。"
+            )
 
 
 def create_skill_files(
@@ -401,6 +469,7 @@ def create_skill_files(
     category = (category or _infer_category(name)).strip()
     triggers = _extract_triggers(name, description, triggers)
     _validate_skill_metadata(name, display_name, category, description, triggers, body)
+    _validate_reference_sizes(references)
 
     # 目录名：小写+短横线
     dir_name = name
@@ -482,6 +551,7 @@ def update_skill_files(
     final_category = category if category is not None else metadata.get('category') or _infer_category(name)
     final_triggers = _extract_triggers(name, final_desc, triggers if triggers is not None else metadata.get('triggers'))
     _validate_skill_metadata(name, final_display_name, final_category, final_desc, final_triggers, final_body)
+    _validate_reference_sizes(references)
 
     frontmatter = _format_skill_frontmatter({
         "name": name,

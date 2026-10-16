@@ -480,7 +480,70 @@ zhongbai2333/Tomato-Novel-Downloader（Rust，MIT），
 
 ---
 
-## 十二、恢复办法
+## 十二、下载管理器 ↔ 拆书页面双向联动
+
+修改日期：**2026-10-15**
+
+### 背景
+
+整本下载落地后遗留一个人工断点：下载完成后界面只给「下载 TXT」按钮，
+用户要另存文件、切到拆书页、再手动上传 —— 百万字 TXT 走一次
+浏览器 round-trip。同时下载任务是单任务输入框，无列表、无历史，
+页面刷新即丢任务号（存于 React state，任务真相在外部下载器内存里）。
+
+本次把整本下载升级为**下载管理器**并接入拆书页面，消灭上述断点。
+实施方案见 `docs/download_manager_plan.md`（含工程审计与接口契约）。
+
+### 后端改动
+
+| 文件 | 改动 |
+| :--- | :--- |
+| `backend/app/api/ext_download.py` | 新增 `DownloadJob` 持久化模型（表 `download_jobs`）、`_sync_jobs` 惰性同步、自动/手动交接链（`_auto_handoff` / `_hand_job_to_book_import` / `_watch_handoff_result`）、5 个 `/ext-download/jobs` 端点（创建/列表/详情/取消/交给拆书）；旧 `/start`、`/status/{job_id}`、`/result/{job_id}` 原样保留 |
+| `backend/app/api/book_import.py` | 新增 `POST /book-import/tasks/from-download`：从下载任务直接创建拆书任务，不经过浏览器下载/上传。校验顺序：存在(404)→归属(403)→状态(409)，顺序不可换（防状态侧漏） |
+| `backend/app/main.py` | lifespan 追加 `download_jobs` 建表 + 幂等补列；**重启不改任务状态**——与 source 任务不同：下载执行者是独立外部进程，后端重启不影响它，真实状态靠惰性同步恢复；只有同步时外部查无任务才标 `lost` |
+| `backend/tests/test_download_manager.py` | 新增 9 个用例：建表/补列幂等、同步状态迁移（done/lost）、交接幂等、from-download 四分支、门控 403 |
+
+### 前端改动
+
+| 文件 | 改动 |
+| :--- | :--- |
+| `frontend/src/types/index.ts` | 新增 `DownloadJob` 接口（21 字段，与后端 `DownloadJobSummary` 一一对应） |
+| `frontend/src/services/api.ts` | 新增 `downloadApi`（jobs/job/start/cancel/toBookImport/bookImportFromDownload）；旧 `extDownloadApi`/`bookImportApi` 未动 |
+| `frontend/src/store/eventBus.ts` | `EventNames` 追加 `DOWNLOAD_JOBS_CHANGED`、`BOOK_IMPORT_TASK_CREATED` |
+| `frontend/src/pages/Source.tsx` | 整本下载卡片重构为下载管理器：多任务列表（六态 Tag + 进度条 + 字数）、取消/下载 TXT/交给拆书/重新交接；交接状态块照抄取源任务样式（多任务分槽轮询拆书进度）；仅在有非终态任务时 3s 轮询；删除旧单任务状态机（`extJobId/extStatus/extRunSeq/extPolling/normalizeExtStatus`） |
+| `frontend/src/pages/BookImport.tsx` | step0 新增「从下载管理器导入」面板：3s 轮询下载任务；done 未交接 →「导入此书」直接创建拆书任务并进入解析流程；已交接 → 显示拆书状态并可「打开该拆书任务」；下载中实时显示进度；面板与上传入口并存互不影响 |
+
+### 联动链路
+
+```
+下载管理器（Source 页 / 拆书页面板）
+  → POST /ext-download/jobs 落库 → 外部下载器抓取
+  → 前端轮询 → 后端惰性同步 DB
+  → state=done 且 auto_import → 后台自动交接拆书（EPUB→TXT→create_task）
+  → 盯拆书终态回写 import_*
+  → 拆书页面板实时显示状态链，一键「导入此书」接入现有解析流程
+```
+
+### 设计决策
+
+1. **落库但不复制真相**：DB 存链接字段（import_task_id）与缓存快照，
+   活跃进度仍现场问外部下载器（惰性同步）；外部查无 → `lost` 而非 `error`
+   （文件可能已落盘，仍可导出/交接）。
+2. **交接幂等**：已交接且拆书任务未终态时复用现有 import_task_id，
+   连点不重复建书；拆书任务内存态丢失（重启）则允许重新交接。
+3. **TXT 不缓存文件**：`epub_to_txt` 现场重转（<1s），只把字数写库
+   供列表展示，避免第二份 120 万字落盘。
+
+### 验证
+
+- 后端：`from app.main import app` 导入 OK；`pytest tests/test_download_manager.py` 9/9 通过
+- 前端：`npm run build`（tsc + vite）0 error
+- 兼容性：`source.py`、`book_import_service.py` 零改动（git diff --ignore-all-space 为空）；
+  旧 ext-download 三端点行为不变
+
+---
+
+## 十三、恢复办法
 
 本工程保留了对上游的引用方式，如需比对原始实现，
 可在 `docs/上游对齐.md` 中查到各文件的来源与差异摘要。

@@ -29,6 +29,19 @@ from app.models import (
     BackgroundTask
 )
 
+# 副轨表：由应用 lifespan 动态建表，不走 alembic 迁移。
+# autogenerate 时必须跳过，否则会生成 drop_table 毁掉用户数据（见 docs/待办.md TODO-010）。
+#
+# 上面 `from app.models import (...)` 是**显式白名单**导入，因此
+# `source_tasks` / `download_jobs`（定义在 app/api/*.py）天然不在
+# target_metadata 里；而库里它们真实存在且有数据 →
+# autogenerate 会判定「这个表不该存在」→ 生成并执行 drop_table。
+#
+# 函数体与副轨表名单放在 app/migration_safety.py（共享位置）而不是就地定义：
+# env.py 顶层会直接跑 run_migrations_*，**import 本文件即触发迁移**，
+# 就地定义的话测试无法安全拿到这个钩子。新增副轨表请改该模块的 SIDE_TRACK_TABLES。
+from app.migration_safety import include_object  # noqa: E402
+
 # Alembic Config 对象
 config = context.config
 
@@ -54,6 +67,7 @@ def run_migrations_offline() -> None:
         compare_type=True,
         compare_server_default=True,
         render_as_batch=True,  # SQLite 必须启用批处理模式
+        include_object=include_object,  # 跳过副轨表，见 TODO-010
     )
 
     with context.begin_transaction():
@@ -68,6 +82,7 @@ def do_run_migrations(connection: Connection) -> None:
         compare_type=True,
         compare_server_default=True,
         render_as_batch=True,  # SQLite 必须启用批处理模式
+        include_object=include_object,  # 跳过副轨表，见 TODO-010
     )
 
     with context.begin_transaction():

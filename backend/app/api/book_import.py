@@ -5,6 +5,7 @@ import asyncio
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -26,6 +27,20 @@ router = APIRouter(prefix="/book-import", tags=["拆书导入"])
 logger = get_logger(__name__)
 
 MAX_TXT_SIZE = 50 * 1024 * 1024  # 50MB
+
+
+class FromDownloadBody(BaseModel):
+    """「从下载管理器导入」的请求体。字段口径与下载侧保持一致。"""
+
+    download_job_id: str = Field(..., description="下载管理器任务 ID")
+    extract_mode: str = Field(default="full", description="解析范围：full=整本 / tail=截取末章")
+    tail_chapter_count: int = Field(default=10, description="extract_mode=tail 时截取末尾章节数")
+
+
+class FromDownloadResponse(BookImportTaskCreateResponse):
+    """在创建响应上补一个 download_job_id，让调用方能把两边对上号。"""
+
+    download_job_id: str = ""
 
 
 @router.post("/tasks", response_model=BookImportTaskCreateResponse, summary="创建拆书任务（上传TXT）")
@@ -83,6 +98,56 @@ async def create_book_import_task(
         tail_chapter_count=create_payload.tail_chapter_count,
     )
     return task
+
+
+@router.post("/tasks/from-download", response_model=FromDownloadResponse, summary="从下载管理器导入")
+async def create_book_import_task_from_download(
+    payload: FromDownloadBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """不经过浏览器下载/上传，直接把下载管理器里已完成的 EPUB 转给拆书管线。
+
+    与上传 TXT 的入口并存：一个是「我手里有文件」，一个是「书已经在
+    下载管理器里」。两者最终都汇到同一个 `create_task`，拆书管线不变。
+
+    校验顺序：先查任务存在（404），再查归属（403），再查状态（409）。
+    顺序不能换 —— 先查状态会把别的用户的任务状态泄露出去。
+    """
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未登录")
+
+    # 延迟导入：book_import 与 ext_download 互相引用对方的东西，
+    # 顶层 import 会让模块加载顺序变成隐式依赖
+    from app.api.ext_download import DownloadJob, _hand_job_to_book_import
+
+    if payload.extract_mode not in {"tail", "full"}:
+        raise HTTPException(status_code=400, detail="extract_mode 仅支持 tail 或 full")
+
+    job = await db.get(DownloadJob, payload.download_job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="下载任务不存在")
+    if job.user_id != user_id:
+        raise HTTPException(status_code=403, detail="该下载任务不属于当前用户")
+    if job.state not in ("done", "lost"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"下载尚未完成（当前状态：{job.state}），不能导入。",
+        )
+
+    result = await _hand_job_to_book_import(
+        db, job, user_id,
+        extract_mode=payload.extract_mode,
+        tail_chapter_count=payload.tail_chapter_count,
+    )
+    await db.commit()
+
+    return FromDownloadResponse(
+        task_id=result["import_task_id"],
+        status="pending",
+        download_job_id=job.id,
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=BookImportTaskStatusResponse, summary="查询拆书任务状态")

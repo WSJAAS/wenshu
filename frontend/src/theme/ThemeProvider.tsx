@@ -29,7 +29,7 @@ const hexToRgba = (hexColor: string, alpha: number): string => {
     return `rgba(${parseInt(hex.slice(0, 2), 16)}, ${parseInt(hex.slice(2, 4), 16)}, ${parseInt(hex.slice(4, 6), 16)}, ${alpha})`;
   }
 
-  return `rgba(136, 77, 92, ${alpha})`;
+  return `rgba(77, 107, 254, ${alpha})`;
 };
 
 export const ThemeProvider = ({ children }: PropsWithChildren) => {
@@ -117,7 +117,7 @@ export const ThemeProvider = ({ children }: PropsWithChildren) => {
     root.setAttribute('data-theme-resolved', resolvedMode);
     root.style.colorScheme = resolvedMode;
 
-    const tooltipBg = themeConfig.token?.colorPrimary ?? '#884d5c';
+    const tooltipBg = themeConfig.token?.colorPrimary ?? '#4D6BFE';
     root.style.setProperty('--app-tooltip-bg', tooltipBg);
     root.style.setProperty('--app-tooltip-shadow', hexToRgba(tooltipBg, 0.3));
   }, [mode, resolvedMode, themeConfig]);

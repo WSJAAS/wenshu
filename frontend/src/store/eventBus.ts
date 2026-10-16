@@ -122,4 +122,10 @@ export const EventNames = {
 
   // 视图切换事件
   SWITCH_TO_MCP_VIEW: 'view:switchToMcp',
+
+  // 下载管理器任务列表变化（新建/取消/交接后触发，供联动页面刷新）
+  DOWNLOAD_JOBS_CHANGED: 'downloadJobs:changed',
+
+  // 从下载管理器创建了拆书任务（供拆书页感知联动来源）
+  BOOK_IMPORT_TASK_CREATED: 'bookImport:taskCreated',
 } as const;

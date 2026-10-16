@@ -527,6 +527,11 @@ class AIService:
         """
         logger.debug(f"🔧 generate_text_stream: auto_mcp={auto_mcp}, tool_choice={tool_choice}")
         
+        # 流式工具编排轮数上限：未指定时取全局配置（与非流式 generate_text 一致），
+        # 由 Provider 层在达到上限时强制关闭工具收口作答。
+        if mcp_max_rounds is None:
+            mcp_max_rounds = app_settings.mcp_max_rounds
+        
         tools_to_use = None
         
         # 加载MCP工具
@@ -561,6 +566,7 @@ class AIService:
                 tools=tools_to_use,
                 tool_choice=tool_choice,
                 user_id=self.user_id,
+                max_rounds=mcp_max_rounds,
             ):
                 if isinstance(chunk, dict):
                     if chunk.get("usage"):

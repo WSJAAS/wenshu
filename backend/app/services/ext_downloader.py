@@ -575,6 +575,41 @@ class ExtDownloaderService:
         lines = text.splitlines()[-max_lines:]
         return "\n".join(lines)[-max_chars:]
 
+    # ---------- 搜索 ----------
+    def search_books(self, query: str) -> list[dict[str, str]]:
+        """复用下载器的书名搜索，只返回书籍标识，不创建下载任务。"""
+        keyword = query.strip()
+        if not keyword:
+            raise ValueError("请输入书名或作者")
+
+        self.ensure_running()
+        try:
+            with self._client() as client:
+                response = client.get(self._url("/api/search"), params={"q": keyword}, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RuntimeError("书名搜索暂时不可用，请稍后重试或使用书籍链接") from exc
+
+        if not isinstance(data, dict) or data.get("error") or not isinstance(data.get("items"), list):
+            raise RuntimeError("当前搜索服务不可用，请使用书籍链接查询")
+
+        books: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in data["items"]:
+            if not isinstance(item, dict):
+                continue
+            book_id = str(item.get("book_id") or "").strip()
+            if not book_id.isdigit() or book_id in seen:
+                continue
+            seen.add(book_id)
+            books.append({
+                "book_id": book_id,
+                "title": str(item.get("title") or "未命名作品"),
+                "author": str(item.get("author") or ""),
+            })
+        return books
+
     # ---------- 任务 ----------
     def download_book(
         self,

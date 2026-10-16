@@ -80,6 +80,49 @@ def _ensure_source_task_columns(sync_conn) -> None:
             logger.info(f"source_tasks 补列: {col}")
 
 
+def _ensure_download_job_columns(sync_conn) -> None:
+    """给已存在的 download_jobs 表补齐后加的列。
+
+    与 `_ensure_source_task_columns` 同理：CREATE TABLE IF NOT EXISTS
+    不会给旧表加列，新字段只能显式 ALTER，先查现有列、缺什么补什么。
+    """
+    from sqlalchemy import inspect as sa_inspect, text as sa_text
+
+    inspector = sa_inspect(sync_conn)
+    if "download_jobs" not in inspector.get_table_names():
+        return
+
+    existing = {c["name"] for c in inspector.get_columns("download_jobs")}
+    wanted = {
+        "user_id": "VARCHAR(100)",
+        "book_id": "VARCHAR(32)",
+        "ext_job_id": "VARCHAR(64) DEFAULT ''",
+        "state": "VARCHAR(20) DEFAULT 'queued'",
+        "message": "VARCHAR(500) DEFAULT ''",
+        "error": "TEXT DEFAULT ''",
+        "book_title": "VARCHAR(300) DEFAULT ''",
+        "book_author": "VARCHAR(200) DEFAULT ''",
+        "chapter_total": "INTEGER DEFAULT 0",
+        "saved_chapters": "INTEGER DEFAULT 0",
+        "group_done": "INTEGER DEFAULT 0",
+        "group_total": "INTEGER DEFAULT 0",
+        "epub_path": "VARCHAR(500) DEFAULT ''",
+        "epub_bytes": "INTEGER DEFAULT 0",
+        "txt_chars": "INTEGER DEFAULT 0",
+        "import_task_id": "VARCHAR(36) DEFAULT ''",
+        "import_status": "VARCHAR(20) DEFAULT ''",
+        "import_message": "VARCHAR(500) DEFAULT ''",
+        "imported_at": "DATETIME",
+        "auto_import": "BOOLEAN DEFAULT 1",
+        "created_at": "DATETIME",
+        "updated_at": "DATETIME",
+    }
+    for col, ddl in wanted.items():
+        if col not in existing:
+            sync_conn.execute(sa_text(f"ALTER TABLE download_jobs ADD COLUMN {col} {ddl}"))
+            logger.info(f"download_jobs 补列: {col}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
@@ -126,6 +169,28 @@ async def lifespan(app: FastAPI):
                 logger.info("书源任务表检查完成")
             except Exception as e:
                 logger.warning(f"书源任务表检查失败（不影响启动）: {e}")
+
+            # 下载管理器任务表：建表 + 补列，但**不改任何状态**。
+            #
+            # 与上面 source_tasks 的「重启标 paused」是刻意的对照：
+            # 取源任务的抓取协程跑在本后端进程里，后端一重启协程就死，
+            # 任务永远停在 running 是种假象，必须标 paused 留给用户续跑。
+            #
+            # 整本下载的执行者是**独立的外部下载器进程**（Rust 工具，
+            # 自己的 HTTP 服务），本后端重启不影响它继续跑。
+            # 所以 DB 里 running 的任务是真的还在跑 —— 重启时改状态
+            # 反而会撒谎。真实状态由下一次读列表时的惰性同步拉回；
+            # 只有同步时外部查无此 ext_job_id（下载器自己重启丢了内存态）
+            # 才标 lost。
+            try:
+                from app.api.ext_download import DownloadJob
+                await conn.run_sync(
+                    lambda sync_conn: DownloadJob.__table__.create(sync_conn, checkfirst=True)
+                )
+                await conn.run_sync(_ensure_download_job_columns)
+                logger.info("下载任务表检查完成")
+            except Exception as e:
+                logger.warning(f"下载任务表检查失败（不影响启动）: {e}")
             interrupted_at = datetime.now()
             await conn.execute(
                 sql_update(BackgroundTask)

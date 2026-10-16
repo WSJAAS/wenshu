@@ -11,7 +11,7 @@ from typing import Optional, List, Dict
 from app.database import get_db
 from app.user_manager import User
 from app.api.settings import require_login
-from app.services.skill_loader import get_all_skills_cached, get_skill_by_trigger, get_skill_detail, create_skill_files, update_skill_files, delete_skill_files, refresh_skills_cache, _get_skill_body
+from app.services.skill_loader import get_all_skills_cached, get_skill_by_trigger, get_skill_detail, create_skill_files, update_skill_files, delete_skill_files, refresh_skills_cache, _get_skill_body, truncate_for_injection
 from app.services.ai_service import AIService, create_user_ai_service
 from app.utils.sse_response import SSEResponse, create_sse_response, wrap_stream_with_heartbeat, HEARTBEAT
 from app.logger import get_logger
@@ -115,7 +115,7 @@ async def skill_chat(
         return create_sse_response(error_gen())
 
     # 获取系统提示词（Skill 内容）
-    system_prompt = skill["content"]
+    system_prompt = truncate_for_injection(skill["content"])
 
     # 构建完整提示词（将历史消息拼接到提示词中）
     history_text = ""

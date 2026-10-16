@@ -36,12 +36,13 @@ import type {
   SourceHandoverGuide,
   SourceStatus,
   SourceLoginState,
-  SourceRankResponse,
+  SourceBookSearchResponse,
   SourceBookResponse,
   SourceTask,
   SourceTaskChaptersResponse,
   SourceSelection,
   ExtDownloadStatus,
+  DownloadJob,
   GenerateCharactersResponse,
   GenerateOutlineResponse,
   Settings,
@@ -1088,16 +1089,14 @@ export const sourceApi = {
   setLogin: (cookie: string) =>
     api.post<unknown, SourceLoginState>('/source/login', { cookie }),
 
-  /** 榜单。保留采集元数据供调用方使用，阅读界面直接展示作品。 */
-  rank: (enrich = true, interval = 1.2) =>
-    api.get<unknown, SourceRankResponse>(
-      `/source/rank?enrich=${enrich}&interval=${interval}`
-    ),
+  /** 按书名或作者查书，不创建下载任务。 */
+  search: (query: string) =>
+    api.get<unknown, SourceBookSearchResponse>('/source/search', { params: { query } }),
 
   /** 书籍详情与完整目录 */
-  book: (bookId: string, interval = 1.2) =>
+  book: (bookId: string, interval = 1.2, fromReader = false) =>
     api.get<unknown, SourceBookResponse>(
-      `/source/book/${encodeURIComponent(bookId)}?interval=${interval}`
+      `/source/book/${encodeURIComponent(bookId)}?interval=${interval}&from_reader=${fromReader}`
     ),
 
   /** 创建取源任务 */
@@ -1175,6 +1174,48 @@ export const extDownloadApi = {
   resultUrl: (jobId: number, title?: string) =>
     `/api/ext-download/result/${jobId}` +
     (title ? `?title=${encodeURIComponent(title)}` : ''),
+};
+
+/**
+ * 下载管理器 API（下载任务落库 + 拆书交接）。
+ *
+ * 与 extDownloadApi 的区别：后者只是外部下载器的薄封装（无状态、
+ * 页面刷新即丢）；这里的任务落库（download_jobs 表），有历史、
+ * 有拆书交接状态，是下载管理器页面与拆书页联动的数据源。
+ */
+export const downloadApi = {
+  /** 任务列表（含惰性同步非终态任务），按创建时间倒序 */
+  jobs: (limit = 30) =>
+    api.get<unknown, DownloadJob[]>(`/ext-download/jobs?limit=${limit}`),
+
+  /** 单个任务（含同步） */
+  job: (id: string) =>
+    api.get<unknown, DownloadJob>(`/ext-download/jobs/${id}`),
+
+  /** 新建下载任务。auto_import 默认 true：完成后自动交给拆书 */
+  start: (payload: { book_id: string; title?: string; author?: string; auto_import?: boolean }) =>
+    api.post<unknown, DownloadJob>('/ext-download/jobs', payload),
+
+  /** 取消任务（尽力转发给外部下载器） */
+  cancel: (id: string) =>
+    api.post<unknown, DownloadJob>(`/ext-download/jobs/${id}/cancel`),
+
+  /**
+   * 手动交接给拆书导入（下载侧入口）。
+   * 幂等：已交接且拆书任务未终态时直接返回现有 import_task_id。
+   */
+  toBookImport: (id: string, extractMode: 'full' | 'tail' = 'full') =>
+    api.post<unknown, { ok: boolean; import_task_id: string; txt_chars: number }>(
+      `/ext-download/jobs/${id}/to-book-import?extract_mode=${extractMode}`),
+
+  /**
+   * 拆书侧入口：从下载任务直接创建拆书任务。
+   * 成功后返回的 task_id 直接挂进拆书页现有轮询流程。
+   */
+  bookImportFromDownload: (downloadJobId: string, extractMode: 'full' | 'tail' = 'full', tailChapterCount = 10) =>
+    api.post<unknown, { task_id: string; status: string; download_job_id: string }>(
+      '/book-import/tasks/from-download',
+      { download_job_id: downloadJobId, extract_mode: extractMode, tail_chapter_count: tailChapterCount }),
 };
 
 export const inspirationApi = {

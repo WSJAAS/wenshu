@@ -29,6 +29,17 @@ from app.models import (
     BackgroundTask
 )
 
+# 副轨表：由应用 lifespan 动态建表，不走 alembic 迁移。
+# autogenerate 时必须跳过，否则会生成 drop_table 毁掉用户数据（见 docs/待办.md TODO-010）。
+#
+# 报告 01 P0-37 只点了 sqlite 侧，但本侧同样中招，且 docker-compose 默认用
+# PostgreSQL —— 只修 sqlite 版的话，默认编排的部署照样删库。
+#
+# 函数体与副轨表名单放在 app/migration_safety.py（共享位置）而不是就地定义：
+# env.py 顶层会直接跑 run_migrations_*，**import 本文件即触发迁移**，
+# 就地定义的话测试无法安全拿到这个钩子。新增副轨表请改该模块的 SIDE_TRACK_TABLES。
+from app.migration_safety import include_object  # noqa: E402
+
 # Alembic Config 对象
 config = context.config
 
@@ -53,6 +64,7 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
         compare_server_default=True,
+        include_object=include_object,  # 跳过副轨表，见 TODO-010
     )
 
     with context.begin_transaction():
@@ -67,6 +79,7 @@ def do_run_migrations(connection: Connection) -> None:
         compare_type=True,
         compare_server_default=True,
         render_as_batch=False,  # PostgreSQL 不需要批处理模式
+        include_object=include_object,  # 跳过副轨表，见 TODO-010
     )
 
     with context.begin_transaction():

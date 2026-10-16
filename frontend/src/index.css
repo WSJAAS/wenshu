@@ -219,11 +219,11 @@ body {
 }
 
 .ant-tooltip .ant-tooltip-inner {
-  background: var(--app-tooltip-bg, #884d5c);
+  background: var(--app-tooltip-bg, #4D6BFE);
   border-radius: 8px;
   padding: 8px 16px;
   font-weight: 500;
-  box-shadow: 0 4px 12px var(--app-tooltip-shadow, rgba(136, 77, 92, 0.3));
+  box-shadow: 0 4px 12px var(--app-tooltip-shadow, rgba(77, 107, 254, 0.3));
   white-space: normal;
   word-break: break-word;
   overflow-wrap: anywhere;

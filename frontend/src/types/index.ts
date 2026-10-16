@@ -817,6 +817,10 @@ export interface SourceBookInfo {
   last_chapter_title: string;
 }
 
+export interface SourceBookSearchResponse {
+  items: Array<Pick<SourceBookInfo, 'book_id' | 'title' | 'author'>>;
+}
+
 export interface SourceBookResponse {
   book: SourceBookInfo;
   chapters: SourceChapterRef[];
@@ -943,6 +947,48 @@ export interface ExtDownloadStatus {
   epub_path?: string | null;
   /** 打包产物的字节数 */
   epub_bytes?: number | null;
+}
+
+// ============================================================
+//  下载管理器（下载任务落库 + 拆书交接）
+// ============================================================
+
+/**
+ * 下载管理器里的整本下载任务（对应后端 download_jobs 表）。
+ *
+ * 与 ExtDownloadJob 的区别：后者是外部下载器的内存快照（不落库），
+ * 这里是本系统自己落库的任务记录，多了一句拆书交接三件套
+ * （import_task_id / import_status / import_message）与 source_tasks 同款。
+ * state: queued / running / done / error / cancelled / lost，
+ * 其中 done / error / cancelled / lost 为终态。
+ */
+export interface DownloadJob {
+  id: string;
+  book_id: string;
+  /** 外部下载器任务号（其 job 表 id，统一存 str） */
+  ext_job_id: string;
+  state: 'queued' | 'running' | 'done' | 'error' | 'cancelled' | 'lost';
+  message: string;
+  error: string;
+  book_title: string;
+  book_author: string;
+  chapter_total: number;
+  saved_chapters: number;
+  group_done: number;
+  group_total: number;
+  epub_path: string;
+  epub_bytes: number;
+  txt_chars: number;
+  /** 拆书交接任务 id；空串 = 未交接 */
+  import_task_id: string;
+  /** 交接状态：空串 = 未交接，handed = 已交接，failed = 交接失败 */
+  import_status: '' | 'handed' | 'failed';
+  import_message: string;
+  imported_at: string | null;
+  /** 下载完成后是否自动交接给拆书 */
+  auto_import: boolean;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 // 向导API响应类型
